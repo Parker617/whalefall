@@ -34,6 +34,7 @@ from whalefall.agent.hooks import (
 )
 from whalefall.agent.roles import (
     AgentConfig, get_agent, is_write_tool, render_system_prompt,
+    wrap_system_reminder,
 )
 from whalefall.core.log import Timer, get_logger, get_request_logger, new_request_id, truncate
 from whalefall.storage.trace import TraceWriter
@@ -70,22 +71,27 @@ class AgentLoop:
         agent_config: AgentConfig,
         *,
         custom_base: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> str:
         """
         按 agent_config.include 声明的顺序装配 system prompt。
 
-        静态积木（BASE_IDENTITY / SYSTEM_PROMPT / GUARDRAILS / TOOL_REFERENCES）放前面，
-        动态积木（ENV_INFO）放后面，便于 LLM 端 prompt cache 命中。完整装配逻辑由
+        静态积木（BASE_IDENTITY / SYSTEM_PROMPT / GUARDRAILS / TONE_STYLE /
+        TOOL_REFERENCES / MCP_INSTRUCTIONS）放前面，动态积木（ENV_INFO）放后面，
+        便于 LLM 端 prompt cache 命中。完整装配逻辑由
         `whalefall.agent.roles.render_system_prompt()` 统一实现。
 
         参数说明：
           custom_base : 调用方显式传入时整体替换 BASE_IDENTITY，并自动跳过 ENV_INFO
                         （典型场景：工作流节点，每个节点有自己的专属身份 markdown）
+          model       : 本次调用使用的模型名，会以 "You are powered by the model ..." 附在 <env> 末尾
         """
         return render_system_prompt(
             agent_config,
             registry=self._registry,
             custom_base=custom_base,
+            mcp_client=self._mcp_client,
+            model=model,
         )
 
     def __init__(
@@ -193,6 +199,7 @@ class AgentLoop:
         full_system = self._build_system_prompt(
             agent_config,
             custom_base=system_prompt,
+            model=effective_model,
         )
 
         messages: List[Dict[str, Any]] = [{"role": "system", "content": full_system}]
@@ -205,7 +212,10 @@ class AgentLoop:
                 parent_ctx_text = str(parent_context)
             messages.append({
                 "role": "system",
-                "content": "[父 Agent 上下文]\n" + truncate(parent_ctx_text, 6000),
+                "content": wrap_system_reminder(
+                    truncate(parent_ctx_text, 6000),
+                    title="父 Agent 上下文",
+                ),
             })
         messages.append({"role": "user", "content": user_query})
         # 本轮会话增量（不含 system），供 QueryEngine 做跨轮持久化
@@ -239,7 +249,13 @@ class AgentLoop:
         )
         extra_context = session_hook.get("additional_context")
         if isinstance(extra_context, str) and extra_context.strip():
-            messages.append({"role": "system", "content": extra_context.strip()})
+            messages.append({
+                "role": "system",
+                "content": wrap_system_reminder(
+                    extra_context.strip(),
+                    title="session_start hook 上下文",
+                ),
+            })
 
         tools = self._get_tools(agent_config)
         rlog.info(
@@ -1077,10 +1093,10 @@ class AgentLoop:
         if not blocks:
             return ""
         blocks.reverse()
-        return (
-            "[压缩后文件上下文恢复]\n"
+        return wrap_system_reminder(
             "以下为最近读取文件的关键片段（自动恢复，用于延续上下文）：\n"
-            + "".join(blocks)
+            + "".join(blocks),
+            title="压缩后文件上下文恢复",
         )
 
     def _build_invoked_skills_restore_message(self, ctx) -> str:
@@ -1112,10 +1128,10 @@ class AgentLoop:
         if not blocks:
             return ""
         blocks.reverse()
-        return (
-            "[压缩后 Skill 上下文恢复]\n"
+        return wrap_system_reminder(
             "以下为本轮前已加载并使用过的 skill 关键内容（自动恢复）：\n"
-            + "".join(blocks)
+            + "".join(blocks),
+            title="压缩后 Skill 上下文恢复",
         )
 
     @staticmethod
@@ -1130,11 +1146,11 @@ class AgentLoop:
             active = store.active_tasks()
             if not active:
                 return ""
-            return (
-                "[系统提醒｜未完成任务]\n"
+            return wrap_system_reminder(
                 "以下是之前会话遗留的未完成任务，请根据用户当前请求决定是否继续：\n\n"
                 + render_summary(store) + "\n\n"
-                + render_task_list(active, store)
+                + render_task_list(active, store),
+                title="未完成任务",
             )
         except Exception:
             return ""
@@ -1153,9 +1169,9 @@ class AgentLoop:
             return ""
 
         from whalefall.tools.todo import render_task_list, render_summary
-        return (
-            "[压缩后任务列表恢复]\n"
+        return wrap_system_reminder(
             "以下为当前未完成的任务（自动恢复，请继续执行）：\n"
             + render_summary(store) + "\n\n"
-            + render_task_list(active, store)
+            + render_task_list(active, store),
+            title="压缩后任务列表恢复",
         )

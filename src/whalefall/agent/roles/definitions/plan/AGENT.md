@@ -5,7 +5,7 @@ max_turns: 50
 allow_write_tools: false
 allow_subagent: false
 allowed_mcp_servers: []
-include: [base_identity, env_info, system_prompt, guardrails, tool_references]
+include: [base_identity, system_prompt, guardrails, tone_style, tool_references, mcp_instructions, env_info]
 ---
 [Plan Mode] 规划模式，专注方案设计与步骤拆解。
 

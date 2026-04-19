@@ -19,7 +19,9 @@ from whalefall.agent.roles.config import AgentConfig, DEFAULT_INCLUDE
 from whalefall.agent.roles.parts import (
     BASE_IDENTITY,
     BEHAVIOR_GUARDRAILS,
+    TONE_STYLE,
     PromptPart,
+    collect_mcp_instructions,
     collect_tool_references,
     render_env_info,
 )
@@ -161,14 +163,17 @@ def render_system_prompt_split(
     *,
     registry: Any = None,
     custom_base: Optional[str] = None,
+    mcp_client: Any = None,
+    model: Optional[str] = None,
 ) -> tuple[str, str]:
     """
     把 system prompt 拆成 (static_prefix, dynamic_suffix)。
 
     - **static_prefix**：每次装配字节稳定的部分（身份 / agent body / 守则 /
-      工具使用指引）。LLM provider 的 prompt cache 可以把它当成长前缀命中。
-    - **dynamic_suffix**：每次装配都会变（ENV_INFO 带日期时间）。放在最后，
-      不会破坏前缀缓存。
+      风格 / 工具使用指引 / MCP server 使用说明）。LLM provider 的 prompt cache
+      可以把它当成长前缀命中。
+    - **dynamic_suffix**：每次装配都会变（ENV_INFO 带日期时间、git/model 等）。
+      放在最后，不会破坏前缀缓存。
 
     顺序遵循 `agent.include`；如果 ENV_INFO 被声明，它会被隔离到 dynamic 段。
     `custom_base` 非空时整体替换 BASE_IDENTITY，并强制跳过 ENV_INFO（节点型
@@ -184,16 +189,24 @@ def render_system_prompt_split(
             seen_base = True
         elif part == PromptPart.ENV_INFO:
             if not (seen_base and custom_base):
-                dynamic_parts.append(render_env_info())
+                dynamic_parts.append(render_env_info(model=model))
         elif part == PromptPart.SYSTEM_PROMPT:
             if agent.system_prompt:
                 static_parts.append(agent.system_prompt)
         elif part == PromptPart.GUARDRAILS:
             static_parts.append(BEHAVIOR_GUARDRAILS)
+        elif part == PromptPart.TONE_STYLE:
+            static_parts.append(TONE_STYLE)
         elif part == PromptPart.TOOL_REFERENCES:
-            tr = collect_tool_references(registry)
+            tr = collect_tool_references(registry, agent_config=agent)
             if tr:
                 static_parts.append(tr)
+        elif part == PromptPart.MCP_INSTRUCTIONS:
+            mi = collect_mcp_instructions(
+                mcp_client, allowed_servers=agent.allowed_mcp_servers
+            )
+            if mi:
+                static_parts.append(mi)
 
     static_prefix = "\n\n".join(p for p in static_parts if p)
     dynamic_suffix = "\n\n".join(p for p in dynamic_parts if p)
@@ -205,17 +218,22 @@ def render_system_prompt(
     *,
     registry: Any = None,
     custom_base: Optional[str] = None,
+    mcp_client: Any = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     按 agent.include 声明的顺序装配最终 system prompt（合并静态 + 动态段）。
 
     积木语义：
-      BASE_IDENTITY    → 通用身份文本；若 custom_base 传入则用它整体替代（此时同时跳过 ENV_INFO）
-      SYSTEM_PROMPT    → agent.system_prompt（来自 definitions/<name>/AGENT.md body）
-      GUARDRAILS       → 通用诚实约束 + 写操作前置检查
-      TOOL_REFERENCES  → 内建工具的 prompt() 汇总（具体工具使用规范下沉到这里）
-      ENV_INFO         → 当前环境信息（日期/cwd/平台）——动态块，被 `render_system_prompt_split`
-                         隔离在末尾，利于 provider 端 prompt cache 命中静态前缀。
+      BASE_IDENTITY     → 通用身份文本；若 custom_base 传入则用它整体替代（此时同时跳过 ENV_INFO）
+      SYSTEM_PROMPT     → agent.system_prompt（来自 definitions/<name>/AGENT.md body）
+      GUARDRAILS        → 诚实约束 + 行动风险分级 + <system-reminder> 约定
+      TONE_STYLE        → 输出风格与引用格式（path:line / no emoji / no colon 前置）
+      TOOL_REFERENCES   → 内建工具的 prompt() 汇总
+      MCP_INSTRUCTIONS  → 已连接 MCP server 的 instructions 聚合（按 allowed_mcp_servers 过滤）
+      ENV_INFO          → 当前环境信息（日期/cwd/git/shell/platform/model）——动态块，
+                          被 `render_system_prompt_split` 隔离在末尾，利于 provider 端
+                          prompt cache 命中静态前缀。
 
     设计说明：
       要针对某个任务/节点**整体替换身份**（如量化分析节点），用
@@ -223,7 +241,11 @@ def render_system_prompt(
       `custom_base` 形参，会替换 BASE_IDENTITY 并自动跳过 ENV_INFO。
     """
     static_prefix, dynamic_suffix = render_system_prompt_split(
-        agent, registry=registry, custom_base=custom_base
+        agent,
+        registry=registry,
+        custom_base=custom_base,
+        mcp_client=mcp_client,
+        model=model,
     )
     if static_prefix and dynamic_suffix:
         return static_prefix + "\n\n" + dynamic_suffix

@@ -6,7 +6,7 @@ allow_write_tools: false
 allow_subagent: false
 allowed_mcp_servers: []
 allowed_skill_paths: []
-include: [base_identity, env_info, system_prompt, guardrails]
+include: [base_identity, system_prompt, guardrails, tone_style, env_info]
 ---
 [Echo Tester] 自定义 agent 示例，用于验证 agent/roles 加载流程。
 

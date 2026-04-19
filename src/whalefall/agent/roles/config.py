@@ -54,7 +54,9 @@ DEFAULT_INCLUDE: tuple[PromptPart, ...] = (
     PromptPart.BASE_IDENTITY,
     PromptPart.SYSTEM_PROMPT,
     PromptPart.GUARDRAILS,
+    PromptPart.TONE_STYLE,
     PromptPart.TOOL_REFERENCES,
+    PromptPart.MCP_INSTRUCTIONS,
     PromptPart.ENV_INFO,
 )
 
@@ -86,9 +88,10 @@ class AgentConfig:
       - system_prompt  : Agent 独有的系统提示词正文（取自 definitions/<name>/AGENT.md body）
       - include        : PromptPart 顺序列表，控制最终 system prompt 由哪些积木拼成。
                          默认顺序为 [BASE_IDENTITY, SYSTEM_PROMPT, GUARDRAILS,
-                         TOOL_REFERENCES, ENV_INFO]——静态块在前、动态块在后，利于
-                         LLM 端 prompt caching 命中。如需完全替换 BASE_IDENTITY，
-                         用 `AgentLoop.run_*(system_prompt=...)` 入参。
+                         TONE_STYLE, TOOL_REFERENCES, MCP_INSTRUCTIONS, ENV_INFO]——
+                         静态块在前、动态块在后，利于 LLM 端 prompt caching 命中。
+                         如需完全替换 BASE_IDENTITY，用
+                         `AgentLoop.run_*(system_prompt=...)` 入参。
     """
     name: str
     description: str = ""
