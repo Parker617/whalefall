@@ -37,10 +37,10 @@
 
 ```text
 组装初始消息列表：
-  system: base_identity + env_info                    ← Layer 1
-  system: AGENT.md 项目配置                           ← Layer 2（可选）
-  system: AgentType 专属 system_prompt                ← Layer 3
-  system: 行为约束 + 工具规范汇总                      ← Layer 4/5
+  system: base_identity + env_info                    ← Layer 1 + 2
+  system: 项目提示词 project_prompt                    ← Layer 3（调用方显式传入，非空才插入）
+  system: AgentType 专属 system_prompt                ← Layer 4
+  system: 行为约束 + 工具规范汇总                      ← Layer 5/6
   system: skills 目录摘要                              ← 额外注入
   [历史消息 + extra_messages ...]
   user:   本次新消息
@@ -263,7 +263,7 @@ include: [base_identity, env_info, system_prompt, guardrails, tool_references]
 
 ---
 
-## 四、每个 Agent 的系统提示词（5 层装配）
+## 四、每个 Agent 的系统提示词（6 层装配）
 
 `include` 字段声明使用哪些积木，按顺序拼为最终 system prompt。实现位置：
 `agent/roles/parts.py`（积木常量 + 动态渲染）+ `agent/roles/loader.py::render_system_prompt()`。
@@ -271,13 +271,25 @@ include: [base_identity, env_info, system_prompt, guardrails, tool_references]
 ```text
 Layer 1: base_identity        ← 通用身份 + 核心行为准则（parts.py::BASE_IDENTITY）
 Layer 2: env_info             ← 日期 / cwd / 平台 / 斜杠命令提示（每次渲染重算）
-Layer 3: agent_md             ← 项目级 `./AGENT.md`（从 cwd 读，`/init` 可一键生成；支持 @include path 递归 3 层）
-Layer 4: system_prompt        ← 各 Agent AGENT.md 正文（agent 独有）
+Layer 3: project_prompt       ← 项目提示词（调用方显式传入的 str；非空才插入）
+                                ⚠ 零文件系统嗅探：框架不会自动扫 `./AGENT.md` 或 `./PROJECT.md`，
+                                  也不会读取 cwd 的任何位置。可通过下列显式通道之一注入：
+                                  · CLI：`--project-prompt TEXT` / `--project-prompt-file FILE`
+                                  · CLI 交互：`/project show|set <text>|load <path>|clear`
+                                  · Web UI：侧栏「项目提示词」面板（📁 导入 / 手写 / 清除）
+                                  · Python API：`AgentLoop.run*(project_prompt=...)`
+                                                 或 `QueryEngine.submit(project_prompt=...)`
+                                  · REST：`PUT /api/sessions/<sid>/project-prompt`
+Layer 4: system_prompt        ← 各 Agent AGENT.md 正文（agent 独有；`definitions/<name>/AGENT.md` body）
 Layer 5: guardrails           ← 诚实与执行约束（写操作前置检查）
 Layer 6: tool_references      ← 已注册每个 BuiltinTool.prompt() 汇总；附 [工具使用指引] 标题
 ```
 
-**general** — 只有 Layer 1 + 2 + 3 + 5 + 6，Layer 4 为空（通用场景不需要专属指令）。
+只有 **general** 的 `include` 默认含 Layer 3 project_prompt；
+explore / plan / verify 作为子 agent 由父 agent 直接喂具体任务 prompt，默认**不订阅**项目提示词。
+想让子 agent 也吃项目提示词，改 `definitions/<name>/AGENT.md` 的 `include:` 加入 `project_prompt` 即可，零代码改动。
+
+**general** — Layer 1 + 2 + 3 + 5 + 6，Layer 4 为空（通用场景不需要专属指令）。
 
 **explore** — Layer 4 extra（节选）：
 
@@ -575,7 +587,7 @@ CLI `--model` 接受这里的别名（如 `gpt-4o-mini`、`deepseek-v3`、`qwen-
 | --- | --- | --- |
 | QueryEngine 主循环 | ✅ | `agent/loop.py` + `agent/query_engine.py` |
 | buildSystemPrompt 5 层 | ✅ | `agent/loop.py::_build_system_prompt` + `roles/parts.py` |
-| AGENT.md 向上扫描 | ✅ | `roles/parts.py::load_project_agent_md`（支持 `@include path` 递归 3 层） |
+| AGENT.md 向上扫描 | ❌ 明确弃用 | 改为显式参数 `project_prompt`（CLI/Web/REST/API），`parts.py::load_project_prompt_from_file` 是仅被调用方按需调用的 helper（支持 `@include path` 递归 3 层） |
 | 权限 5 步管道 | ✅ 简化+扩展 | `permissions/manager.py`（8 步，跳过 LLM 判断，新增 pause/指纹） |
 | YOLO_MODE（bypass） | ✅ | `bypass_all` |
 | **PAUSE_MODE** | ✅ 新增 | `pause_all` + `PermissionManager.pause_mode()` |
@@ -614,12 +626,49 @@ python -m whalefall.main --agent verify "复核这份分析"
 python -m whalefall.main --model gpt-4.1 --no-stream "…"
 python -m whalefall.main --bypass "…"                 # 危险：跳过所有权限询问
 python -m whalefall.main --no-mcp --no-builtin "…"
+
+# 项目提示词（Layer 3）显式注入
+python -m whalefall.main --project-prompt "全部使用简体中文回答" "..."
+python -m whalefall.main --project-prompt-file ./PROJECT.md "..."
+```
+
+交互模式下还可用 `/project` 斜杠命令运行时管理：
+
+```text
+/project                  # 展示当前会话项目提示词
+/project set <多行文本>    # 设置并持久化到本 session
+/project load ./PROJECT.md  # 从 md 文件加载（支持 @include 递归 3 层）
+/project clear            # 清除本会话项目提示词
+/init                     # 在 cwd 生成 PROJECT.md 模板（框架不会自动读，需显式 /project load）
 ```
 
 ### 15.2 Web
 
 ```bash
 python -m whalefall.main --web --host 0.0.0.0 --port 8000
+# 也可启动时设一个全局默认项目提示词，新 session 首次出现时自动 seed：
+python -m whalefall.main --web --project-prompt-file ./PROJECT.md
+```
+
+Web UI 侧栏的「项目提示词」面板支持：
+
+- 当前会话提示词实时展示（右上角显示"N 字符/未设置"）
+- 直接在 textarea 里编辑 + 保存按钮
+- 📁 导入：选择本地 `.md` / `.txt` 文件
+- 清除：一键清空本会话的项目提示词
+- 对应 REST 端点（也可用 curl / Python 直接调用）：
+
+```bash
+# 读取
+curl http://localhost:8000/api/sessions/<sid>/project-prompt
+# 设置
+curl -X PUT -H "Content-Type: application/json" \
+  -d '{"prompt":"# 项目规范\n全部使用简体中文"}' \
+  http://localhost:8000/api/sessions/<sid>/project-prompt
+# 清除
+curl -X PUT -H "Content-Type: application/json" \
+  -d '{"prompt":null}' \
+  http://localhost:8000/api/sessions/<sid>/project-prompt
 ```
 
 ### 15.3 MCP Server 单跑
@@ -648,6 +697,30 @@ from whalefall.agent.roles import (
 list_agent_names()          # ['echo-tester', 'explore', 'general', 'plan', 'verify']
 cfg = get_agent("explore")  # 找不到自动回退 general
 sp = render_system_prompt(cfg, registry=build_default_registry())
+
+# 注入项目提示词作为 Layer 3
+sp = render_system_prompt(
+    cfg,
+    registry=build_default_registry(),
+    project_prompt="# 项目规范\n全部使用简体中文回答",
+)
+```
+
+更高层接入推荐用 `QueryEngine`，它会自动把 `project_prompt` 持久化到 `session_store`：
+
+```python
+from whalefall.agent.query_engine import QueryEngine
+
+qe = QueryEngine(...)
+async for chunk in qe.submit(
+    "帮我读 README.md",
+    session_id="demo",
+    project_prompt="# 项目规范\n所有回答用简体中文",  # 仅首次需要传，之后自动从 session 读出
+):
+    print(chunk, end="")
+
+qe.set_project_prompt("demo", "# 新规范\n…")  # 单独管理
+qe.get_project_prompt("demo")
 ```
 
 ---
@@ -692,7 +765,7 @@ sp = render_system_prompt(cfg, registry=build_default_registry())
    - 写工具真伪：`BuiltinTool.read_only` / `MCPClient.is_destructive`（`WRITE_TOOLS` 仅启动保底）
    - Agent 定义：AGENT.md 单文件，内建 agent 无特权
 2. **事实与规则分离**
-   - 规则（BASE / GUARDRAILS）静态常量；事实（env / agent_md / tool prompts）动态渲染
+   - 规则（BASE / GUARDRAILS）静态常量；事实（env / project_prompt / tool prompts）动态渲染
 3. **CLI / Web / 后台 job 走同一个 `QueryEngine`**，session 与压缩逻辑不分叉
 4. **所有落盘入口收敛到 `storage/`**，所有运行态收敛到 `.runtime/`，不散布 `open()`
 5. **Permission 8 步管道是显式、可读、可单测的**；默认集合互斥由 pytest 守护

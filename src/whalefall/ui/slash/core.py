@@ -12,14 +12,27 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-AGENT_MD_TEMPLATE = (
-    "# AGENT.md\n\n"
-    "本文件用于定义当前项目中 agent 的工作约定。\n\n"
-    "可填写内容示例：\n"
-    "- 项目背景\n"
-    "- 编码规范\n"
-    "- 测试与验证要求\n"
-    "- 禁止事项\n"
+PROJECT_MD_TEMPLATE = (
+    "# 项目提示词 (PROJECT.md)\n\n"
+    "本文件作为 whalefall 的**项目提示词**（Layer 3）模板使用。\n"
+    "与 Claude Code 的 `CLAUDE.md`、Codex 的 `AGENTS.md` 定位一致，\n"
+    "用于给 agent 提供项目级约定、领域知识、禁忌等。\n\n"
+    "## 说明：不会自动读取\n"
+    "本文件**不会被框架自动加载**，必须显式注入：\n"
+    "- CLI：`whalefall --project-prompt-file ./PROJECT.md ...`\n"
+    "         或启动后运行 `/project load ./PROJECT.md`\n"
+    "- Web：侧栏「项目提示词」面板 → 📁 导入按钮 → 选择本文件\n"
+    "- Python API：先 `load_project_prompt_from_file('./PROJECT.md')`\n"
+    "              再把返回的 str 传给 `AgentLoop.run*(project_prompt=...)`\n"
+    "或 `QueryEngine.submit(project_prompt=...)`\n\n"
+    "支持 `@include relative/path.md` 递归展开（最多 3 层）。\n\n"
+    "## 项目背景\n\n"
+    "（简述项目用途、主要场景）\n\n"
+    "## 编码 / 交付规范\n\n"
+    "- （例：全部使用简体中文回答）\n"
+    "- （例：代码遵循 PEP8；尽量小步提交）\n\n"
+    "## 禁止事项\n\n"
+    "- （例：不要直接访问生产数据库）\n"
 )
 
 
@@ -27,7 +40,7 @@ COMMON_HELP_LINES: Tuple[str, ...] = (
     "/clear             清空当前会话上下文",
     "/compact           手动执行一次 microcompact",
     "/resume [id]       列出最近会话或恢复指定会话",
-    "/init              在当前工作目录创建 AGENT.md（若不存在）",
+    "/init              在当前工作目录创建 PROJECT.md 模板（不会自动读取，需用 /project load 或 --project-prompt-file 显式注入）",
     "/stats             显示当前会话统计",
     "/help              显示此帮助",
 )
@@ -154,16 +167,35 @@ def cmd_resume(ctx: SlashContext, arg: str) -> SlashResult:
 
 
 def cmd_init(ctx: SlashContext) -> SlashResult:
+    """
+    在当前工作目录生成 PROJECT.md 模板。
+    本文件不会被框架自动加载；用户需显式通过 /project load、--project-prompt-file
+    或 API 参数注入为 Layer 3 项目提示词。
+    """
     target_dir = ctx.cwd or os.getcwd()
-    target = os.path.join(target_dir, "AGENT.md")
+    target = os.path.join(target_dir, "PROJECT.md")
     if os.path.exists(target):
-        return SlashResult(handled=True, message=f"AGENT.md 已存在: {target}")
+        hint = (
+            f"PROJECT.md 已存在: {target}\n"
+            "提示：本文件不会自动加载。用以下任一方式显式注入：\n"
+            "  - CLI：运行 /project load ./PROJECT.md\n"
+            "  - CLI 启动参数：--project-prompt-file ./PROJECT.md\n"
+            "  - Web UI：侧栏「项目提示词」面板 → 📁 导入"
+        )
+        return SlashResult(handled=True, message=hint)
     try:
         with open(target, "w", encoding="utf-8") as f:
-            f.write(AGENT_MD_TEMPLATE)
+            f.write(PROJECT_MD_TEMPLATE)
     except OSError as exc:
-        return SlashResult(handled=True, message=f"创建 AGENT.md 失败: {exc}")
-    return SlashResult(handled=True, message=f"已创建 AGENT.md: {target}")
+        return SlashResult(handled=True, message=f"创建 PROJECT.md 失败: {exc}")
+    msg = (
+        f"已创建 PROJECT.md: {target}\n"
+        "⚠ 本文件不会被自动加载。编辑完成后用以下任一方式显式注入：\n"
+        "  - 运行 /project load ./PROJECT.md\n"
+        "  - 重启时带 --project-prompt-file ./PROJECT.md\n"
+        "  - Web UI：侧栏「项目提示词」面板 → 📁 导入"
+    )
+    return SlashResult(handled=True, message=msg)
 
 
 def cmd_stats(ctx: SlashContext) -> SlashResult:

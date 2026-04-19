@@ -15,6 +15,8 @@ whalefall CLI 入口
 选项说明：
   --model MODEL     使用的 LLM 模型（默认: gpt-4o-mini；别名见 llm_config.ini）
   --agent TYPE      Agent 类型（general/explore/plan/verify，默认: general）
+  --project-prompt TEXT     项目提示词文本（Layer 3；直接作为字符串注入）
+  --project-prompt-file P   项目提示词文件（.md；支持 @include path 递归展开）
   --no-stream       禁用流式输出（等待完整响应）
   --bypass          --dangerously-bypass-permissions（跳过所有权限询问）
   --request-id ID   指定请求 ID（用于 trace）
@@ -65,6 +67,17 @@ def _parse_args():
         default=None,
         help="覆盖本次任务最大回合数（仅当前命令生效）",
     )
+    pp_group = parser.add_mutually_exclusive_group()
+    pp_group.add_argument(
+        "--project-prompt",
+        default=None,
+        help="项目提示词文本（Layer 3；与 --project-prompt-file 二选一）",
+    )
+    pp_group.add_argument(
+        "--project-prompt-file",
+        default=None,
+        help="项目提示词 Markdown 文件路径（支持 @include path 递归展开）",
+    )
     parser.add_argument(
         "--no-stream",
         action="store_true",
@@ -114,13 +127,40 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _resolve_project_prompt(args) -> str | None:
+    """
+    解析 --project-prompt / --project-prompt-file，返回字符串或 None。
+    文件不存在或读取为空时打印警告并按 None 处理。
+    """
+    if args.project_prompt:
+        return args.project_prompt
+    if args.project_prompt_file:
+        from whalefall.agent.roles import load_project_prompt_from_file
+        text = load_project_prompt_from_file(args.project_prompt_file)
+        if not text.strip():
+            print(
+                f"[警告] --project-prompt-file 读取为空：{args.project_prompt_file}",
+                file=sys.stderr,
+            )
+            return None
+        return text
+    return None
+
+
 def main():
     args = _parse_args()
+
+    project_prompt = _resolve_project_prompt(args)
 
     if args.web:
         from whalefall.ui.web import run as web_run
         print(f"Web UI 启动中：http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}")
-        web_run(host=args.host, port=args.port, model=args.model or "gpt-4o-mini")
+        web_run(
+            host=args.host,
+            port=args.port,
+            model=args.model or "gpt-4o-mini",
+            project_prompt=project_prompt,
+        )
         return
 
     # 设置日志级别
@@ -196,6 +236,7 @@ def main():
             bypass_permissions=args.bypass,
             request_id=args.request_id,
             max_turns=args.max_turns,
+            project_prompt=project_prompt,
         )
         try:
             result = cli.run_once(args.query)
@@ -220,6 +261,7 @@ def main():
         bypass_permissions=args.bypass,
         request_id=args.request_id,
         max_turns=args.max_turns,
+        project_prompt=project_prompt,
     )
     try:
         cli.start()

@@ -229,6 +229,92 @@
   }
   .clean-btn:hover { border-color: var(--red); color: var(--red); }
 
+  /* ── 项目提示词面板 ── */
+  .project-prompt-panel {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px 12px;
+    flex-shrink: 0;
+  }
+  .project-prompt-panel summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    user-select: none;
+    padding: 2px 0 6px;
+  }
+  .project-prompt-panel summary::-webkit-details-marker { display: none; }
+  .project-prompt-panel summary::before {
+    content: "▸";
+    display: inline-block;
+    transition: transform .15s;
+    color: var(--muted);
+  }
+  .project-prompt-panel[open] summary::before { transform: rotate(90deg); }
+  .project-prompt-panel .pp-indicator {
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .project-prompt-panel .pp-indicator.on { color: var(--green); }
+  .project-prompt-panel textarea {
+    width: 100%;
+    min-height: 90px;
+    max-height: 240px;
+    padding: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .project-prompt-panel textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .pp-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+  .pp-actions button {
+    flex: 1;
+    min-width: 60px;
+    padding: 5px 6px;
+    font-size: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .pp-actions button.primary { border-color: var(--accent); color: var(--accent); }
+  .pp-actions button.primary:hover { background: rgba(91,110,245,.12); }
+  .pp-actions button.danger:hover { border-color: var(--red); color: var(--red); }
+  .pp-actions button:hover { border-color: var(--accent); }
+  .pp-actions button:disabled { opacity: .4; cursor: not-allowed; }
+  .pp-hint {
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
   /* ── 对话区包装 ── */
   .chat-wrap {
     flex: 1;
@@ -429,6 +515,27 @@
     <div class="sidebar-top">
       <button id="new-chat-btn"><span class="plus">＋</span>新建会话</button>
     </div>
+
+    <details class="project-prompt-panel" id="project-prompt-panel">
+      <summary>
+        <span>项目提示词</span>
+        <span class="pp-indicator" id="pp-indicator">未设置</span>
+      </summary>
+      <textarea id="pp-textarea" placeholder="作为 Layer 3 注入当前会话系统提示词。
+支持 Markdown；例如：
+  # 本项目规范
+  - 全部使用简体中文回答
+  - 代码风格遵循 PEP8"></textarea>
+      <div class="pp-actions">
+        <button id="pp-save-btn" class="primary" title="保存到当前会话">保存</button>
+        <button id="pp-load-file-btn" title="从 .md 文件导入">📁 导入</button>
+        <button id="pp-clear-btn" class="danger" title="清除本会话项目提示词">清除</button>
+        <button id="pp-reload-btn" title="重新从服务端拉取">↻</button>
+      </div>
+      <div class="pp-hint">保存后立即持久化到当前会话；新建会话需重新设置。</div>
+      <input type="file" id="pp-file-input" accept=".md,.txt,text/markdown,text/plain" style="display:none"/>
+    </details>
+
     <div class="sidebar-label">历史会话</div>
     <div class="session-list" id="session-list">
       <div class="session-empty">加载中…</div>
@@ -765,9 +872,10 @@ async function switchSession(sid) {
     el.classList.toggle('active', el.dataset.sid === sid);
   });
 
-  // 清空聊天区，加载历史
+  // 清空聊天区，加载历史，刷新项目提示词
   clearChat();
   await loadSessionHistory(sid);
+  refreshProjectPrompt();
 }
 
 async function loadSessionHistory(sid) {
@@ -808,6 +916,7 @@ async function deleteSession(sid, itemEl) {
       sessionId = createSessionId();
       localStorage.setItem('whalefall_session_id', sessionId);
       clearChat();
+      refreshProjectPrompt();
     }
     itemEl.remove();
     // 如果列表空了补提示
@@ -839,6 +948,7 @@ document.querySelectorAll('.clean-btn').forEach(btn => {
         sessionId = createSessionId();
         localStorage.setItem('whalefall_session_id', sessionId);
         clearChat();
+        refreshProjectPrompt();
       }
       appendSystemMsg(`已清理 ${data.deleted} 个 ${days} 天前的会话`);
     } catch {
@@ -854,7 +964,95 @@ document.getElementById('new-chat-btn').addEventListener('click', () => {
   clearChat();
   // 取消侧边栏所有高亮
   document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  // 新会话的项目提示词由后端按启动默认值 seed；刷新面板以显示最新状态
+  refreshProjectPrompt();
   document.getElementById('input').focus();
+});
+
+// ── 项目提示词面板（Layer 3） ─────────────────────────────────────────────
+async function refreshProjectPrompt() {
+  const ta = document.getElementById('pp-textarea');
+  const indicator = document.getElementById('pp-indicator');
+  ta.value = '';
+  indicator.textContent = '…';
+  indicator.classList.remove('on');
+  try {
+    const resp = await fetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/project-prompt`
+    );
+    if (!resp.ok) throw new Error('fetch failed');
+    const data = await resp.json();
+    const prompt = (data && data.prompt) || '';
+    ta.value = prompt;
+    if (prompt) {
+      indicator.textContent = `${prompt.length} 字符`;
+      indicator.classList.add('on');
+    } else {
+      indicator.textContent = '未设置';
+    }
+  } catch {
+    indicator.textContent = '加载失败';
+  }
+}
+
+async function saveProjectPrompt(promptOrNull) {
+  const resp = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/project-prompt`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: promptOrNull }),
+    }
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (!data.ok) throw new Error(data.error || '保存失败');
+  return data;
+}
+
+document.getElementById('pp-save-btn').addEventListener('click', async () => {
+  const text = document.getElementById('pp-textarea').value;
+  try {
+    await saveProjectPrompt(text);
+    appendSystemMsg(text.trim()
+      ? `✅ 项目提示词已保存（${text.length} 字符）`
+      : '✅ 已清除本会话项目提示词');
+    refreshProjectPrompt();
+  } catch (e) {
+    appendSystemMsg(`❌ 保存失败：${e.message || e}`, true);
+  }
+});
+
+document.getElementById('pp-clear-btn').addEventListener('click', async () => {
+  if (!confirm('清除本会话的项目提示词？')) return;
+  try {
+    await saveProjectPrompt(null);
+    appendSystemMsg('✅ 已清除本会话项目提示词');
+    refreshProjectPrompt();
+  } catch (e) {
+    appendSystemMsg(`❌ 清除失败：${e.message || e}`, true);
+  }
+});
+
+document.getElementById('pp-reload-btn').addEventListener('click', refreshProjectPrompt);
+
+document.getElementById('pp-load-file-btn').addEventListener('click', () => {
+  document.getElementById('pp-file-input').click();
+});
+
+document.getElementById('pp-file-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';  // 允许重复选同一文件
+  if (!file) return;
+  try {
+    const text = await file.text();
+    document.getElementById('pp-textarea').value = text;
+    await saveProjectPrompt(text);
+    appendSystemMsg(`✅ 已从 ${file.name} 导入项目提示词（${text.length} 字符）`);
+    refreshProjectPrompt();
+  } catch (err) {
+    appendSystemMsg(`❌ 文件导入失败：${err.message || err}`, true);
+  }
 });
 
 // ── 发送 ──────────────────────────────────────────────────────────────────
@@ -995,8 +1193,9 @@ document.getElementById('restart-btn').addEventListener('click', doRestart);
 // ── 启动 ─────────────────────────────────────────────────────────────────
 connect();
 
-// 加载侧边栏 + 恢复当前会话历史
+// 加载侧边栏 + 恢复当前会话历史 + 项目提示词面板
 loadSessionList().then(() => loadSessionHistory(sessionId));
+refreshProjectPrompt();
 </script>
 </body>
 </html>

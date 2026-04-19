@@ -20,6 +20,7 @@ Inspired by the overall shape of [Claude Code](https://github.com/anthropics/cla
 - **Triple-layer context compression** — `microcompact` (truncate old tool results), `auto_compact` (summarize after 92% of context), `precompact` (eager summary before the next turn if projected to overflow).
 - **Resume-capable sessions** — every turn persists to `.runtime/`; crash mid-generation, restart, pick up right where the last completed tool call landed.
 - **Web UI with live tool trace** — FastAPI + WebSocket; soft-reload config on the fly (`🔄`) or hot-replace code via `os.execv` (`♻️`) — no need to leave the browser.
+- **Explicit project prompt (Layer 3)** — inject project-specific guidance via `--project-prompt[-file]`, `/project` slash command, the Web sidebar panel, or `QueryEngine.submit(project_prompt=...)`. **Zero filesystem sniffing**: nothing is auto-read from `cwd`; you always know exactly what the model sees.
 
 See `src/whalefall/README.md` for the ~700-line design document.
 
@@ -73,6 +74,37 @@ whalefall --agent verify  "audit the analysis above"
 # Web UI
 whalefall --web --port 8000
 # open http://localhost:8000
+```
+
+### 5. (Optional) Project prompt — explicit, never auto-loaded
+
+Whalefall does **not** scan `cwd/AGENT.md`, `cwd/PROJECT.md`, or anything similar. Project-level guidance is injected at **Layer 3** of the system prompt only when you ask for it:
+
+```bash
+# CLI: one-shot string
+whalefall --project-prompt "Always answer in English. Prefer pathlib over os.path." "..."
+
+# CLI: load from a markdown file (supports @include path, recursion depth 3)
+whalefall --project-prompt-file ./PROJECT.md "..."
+
+# CLI interactive: runtime management (persists into the current session)
+whalefall
+> /project                 # show current
+> /project set Always answer in English.
+> /project load ./PROJECT.md
+> /project clear
+> /init                    # create a PROJECT.md template in cwd (you must still /project load it)
+
+# Web UI: sidebar panel "项目提示词" — write / drag-drop / save / clear
+whalefall --web --project-prompt-file ./PROJECT.md   # also seeds new sessions
+
+# REST (per session)
+curl -X PUT -H "Content-Type: application/json" \
+  -d '{"prompt":"# Project rules\nUse Chinese."}' \
+  http://localhost:8000/api/sessions/<sid>/project-prompt
+
+# Python
+qe.submit("...", session_id="demo", project_prompt="# Project rules\n...")
 ```
 
 ---

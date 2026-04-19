@@ -107,7 +107,11 @@ def test_dispatch_init_creates_file() -> None:
         ctx = SlashContext(query_engine=qe, session_id="s1", cwd=tmp)
         r = dispatch_common("/init", ctx)
         assert r.handled and "已创建" in r.message
-        assert os.path.exists(os.path.join(tmp, "AGENT.md"))
+        target = os.path.join(tmp, "PROJECT.md")
+        assert os.path.exists(target)
+        # 模板应提醒不会自动加载，并指向显式注入方式
+        body = open(target, encoding="utf-8").read()
+        assert "不会" in body and ("project-prompt-file" in body or "/project load" in body)
         # 第二次应报"已存在"
         r2 = dispatch_common("/init", ctx)
         assert r2.handled and "已存在" in r2.message
