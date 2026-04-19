@@ -21,8 +21,8 @@ from whalefall.agent.roles.parts import (
     BEHAVIOR_GUARDRAILS,
     PromptPart,
     collect_tool_references,
-    load_project_agent_md,
     render_env_info,
+    render_project_prompt,
 )
 from whalefall.core.log import get_logger
 
@@ -162,6 +162,7 @@ def render_system_prompt(
     *,
     registry: Any = None,
     custom_base: Optional[str] = None,
+    project_prompt: Optional[str] = None,
 ) -> str:
     """
     按 agent.include 声明的顺序装配最终 system prompt。
@@ -169,10 +170,14 @@ def render_system_prompt(
     积木语义：
       BASE_IDENTITY    → 通用身份文本；若 custom_base 传入则用它替代（此时同时跳过 ENV_INFO）
       ENV_INFO         → 当前环境信息（日期/cwd/平台）
-      AGENT_MD         → cwd/AGENT.md 项目配置（由 `/init` 生成）
-      SYSTEM_PROMPT    → agent.system_prompt（AGENT.md body）
+      PROJECT_PROMPT   → 项目提示词（由调用方显式传入的 project_prompt 字符串；None/空串则整段跳过）
+      SYSTEM_PROMPT    → agent.system_prompt（来自 definitions/<name>/AGENT.md body）
       GUARDRAILS       → 通用诚实约束 + 写操作前置检查
       TOOL_REFERENCES  → 内建工具的 prompt() 汇总（具体工具使用规范下沉到这里）
+
+    设计说明：
+      项目提示词层只认参数，不读文件系统；如需从文件读，调用方先用
+      `parts.load_project_prompt_from_file()` 转成 str 再传入。
     """
     parts: List[str] = []
     seen_base = False
@@ -185,10 +190,10 @@ def render_system_prompt(
             # custom_base 已包含调用方自己的开场，跳过环境信息避免重复
             if not (seen_base and custom_base):
                 parts.append(render_env_info())
-        elif part == PromptPart.AGENT_MD:
-            md = load_project_agent_md()
-            if md:
-                parts.append(md)
+        elif part == PromptPart.PROJECT_PROMPT:
+            pp = render_project_prompt(project_prompt)
+            if pp:
+                parts.append(pp)
         elif part == PromptPart.SYSTEM_PROMPT:
             if agent.system_prompt:
                 parts.append(agent.system_prompt)

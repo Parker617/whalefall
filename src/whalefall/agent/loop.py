@@ -71,18 +71,24 @@ class AgentLoop:
         agent_config: AgentConfig,
         *,
         custom_base: Optional[str] = None,
+        project_prompt: Optional[str] = None,
     ) -> str:
         """
         按 agent_config.include 声明的顺序装配 system prompt。
 
         所有静态积木（BASE_IDENTITY / GUARDRAILS / TOOL_USAGE_RULES）与动态积木
-        （ENV_INFO / AGENT_MD / SYSTEM_PROMPT / TOOL_REFERENCES）都由
+        （ENV_INFO / PROJECT_PROMPT / SYSTEM_PROMPT / TOOL_REFERENCES）都由
         `whalefall.agent.roles.render_system_prompt()` 统一组装。
+
+        参数说明：
+          custom_base   : 替换 Layer 1 BASE_IDENTITY（同时跳过 Layer 2 ENV_INFO）
+          project_prompt: Layer 3 "项目提示词"的显式文本；None/空则该层跳过
         """
         return render_system_prompt(
             agent_config,
             registry=self._registry,
             custom_base=custom_base,
+            project_prompt=project_prompt,
         )
 
     def _build_skill_listing_reminder(self, agent_config: "AgentConfig") -> str:
@@ -176,6 +182,7 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -213,7 +220,11 @@ class AgentLoop:
         )
 
         effective_model = model or agent_config.model or None
-        full_system = self._build_system_prompt(agent_config, custom_base=system_prompt)
+        full_system = self._build_system_prompt(
+            agent_config,
+            custom_base=system_prompt,
+            project_prompt=project_prompt,
+        )
 
         messages: List[Dict[str, Any]] = [{"role": "system", "content": full_system}]
         skill_listing_reminder = self._build_skill_listing_reminder(agent_config)
@@ -655,6 +666,7 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -673,6 +685,7 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
+            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
@@ -700,6 +713,7 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -720,6 +734,7 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
+            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
@@ -753,6 +768,7 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -772,6 +788,7 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
+            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
@@ -817,6 +834,7 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -835,6 +853,7 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
+            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,

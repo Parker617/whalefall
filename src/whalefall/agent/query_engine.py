@@ -176,6 +176,7 @@ class QueryEngine:
         user_query: str,
         agent_config: AgentConfig,
         model: Optional[str] = None,
+        project_prompt: Optional[str] = None,
         request_id: Optional[str] = None,
         on_text: Optional[Callable[[str], None]] = None,
         on_tool_start: Optional[Callable[[str, Dict], None]] = None,
@@ -189,10 +190,18 @@ class QueryEngine:
         并发语义：
         - 同一个 session 串行（加 session 级锁，防止并发写历史）
         - 不同 session 并行（锁互不影响）
+
+        project_prompt 语义：
+        - 传入非空字符串 → 本轮使用该项目提示词；同时写回 session_store，
+          供后续同 session 请求（刷新 / 重连 / 续跑）自动复用。
+        - 传入空串 "" → 显式清除该 session 的项目提示词并持久化。
+        - 传入 None（默认） → 从 session_store 读取上次保存的值作为兜底。
         """
         sid = self._normalize_session_id(session_id)
         self.create_session(sid)
         lock = self._get_session_lock(sid)
+
+        effective_prompt = self._resolve_project_prompt(sid, project_prompt)
 
         with lock:
             history = self.get_session_messages(sid)
@@ -201,6 +210,7 @@ class QueryEngine:
                     user_query=user_query,
                     agent_config=agent_config,
                     model=model,
+                    project_prompt=effective_prompt,
                     request_id=request_id,
                     extra_messages=history,
                     on_text=on_text,
@@ -215,6 +225,7 @@ class QueryEngine:
                     user_query=user_query,
                     agent_config=agent_config,
                     model=model,
+                    project_prompt=effective_prompt,
                     request_id=request_id,
                     extra_messages=history,
                     on_text=on_text,
@@ -248,6 +259,55 @@ class QueryEngine:
             self._submit_count += 1
             self._run_housekeeping(force=False)
             return final_answer
+
+    # ------------------------------------------------------------------ #
+    #                   项目提示词（Layer 3）API                            #
+    # ------------------------------------------------------------------ #
+    def get_project_prompt(self, session_id: str) -> Optional[str]:
+        """读取会话当前的项目提示词；未持久化或已清空返回 None。"""
+        sid = self._normalize_session_id(session_id)
+        if self._store is None:
+            return None
+        try:
+            return self._store.load_project_prompt(sid)
+        except Exception:
+            return None
+
+    def set_project_prompt(self, session_id: str, project_prompt: Optional[str]) -> None:
+        """
+        显式设置会话的项目提示词（供 Web UI 侧栏 / REST 端点调用）。
+        空串或 None 视为清除。
+        """
+        sid = self._normalize_session_id(session_id)
+        self.create_session(sid)
+        if self._store is None:
+            return
+        self._store.save_project_prompt(sid, project_prompt)
+
+    def _resolve_project_prompt(
+        self, sid: str, incoming: Optional[str]
+    ) -> Optional[str]:
+        """
+        根据入参决定本轮实际使用的项目提示词，并同步到 store：
+          - incoming is None  → 不覆盖；取 store 中已存值兜底
+          - incoming == ""    → 显式清除并持久化
+          - incoming 非空      → 使用并持久化
+        """
+        if incoming is None:
+            if self._store is None:
+                return None
+            try:
+                return self._store.load_project_prompt(sid)
+            except Exception:
+                return None
+
+        text = incoming.strip()
+        if self._store is not None:
+            try:
+                self._store.save_project_prompt(sid, text if text else None)
+            except Exception:
+                pass
+        return text or None
 
     # ------------------------------------------------------------------ #
     #                       内部方法                                       #

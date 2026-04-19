@@ -9,8 +9,11 @@
 - 静态常量（BASE_IDENTITY / BEHAVIOR_GUARDRAILS）保持跨 agent 复用；
 - 工具级使用规范（文件读写/搜索/bash 等）下沉到各 `BuiltinTool.prompt()`，
   通过 TOOL_REFERENCES 积木自动汇总；
-- 动态积木通过函数渲染（render_env_info / load_project_agent_md / collect_tool_references），
+- 动态积木通过函数渲染（render_env_info / render_project_prompt / collect_tool_references），
   在每次 build system prompt 时重新计算（环境信息、工具 prompt() 等）。
+- **项目提示词 PROJECT_PROMPT 不做任何文件系统嗅探**：它的内容完全由调用方
+  显式传入（API 参数 / CLI --project-prompt / Web UI 侧栏）。如需从文件读取，
+  调用方可用下方 `load_project_prompt_from_file()` 作为独立 helper。
 """
 from __future__ import annotations
 
@@ -21,15 +24,15 @@ import sys
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 class PromptPart(str, Enum):
     """系统提示词积木组件。"""
     BASE_IDENTITY = "base_identity"      # 通用身份 + 核心行为准则
     ENV_INFO = "env_info"                # 当前日期/cwd/平台 + 斜杠命令提示
-    AGENT_MD = "agent_md"                # cwd/AGENT.md 项目级配置（用户工程根，/init 可生成）
-    SYSTEM_PROMPT = "system_prompt"      # agent 自己的 system_prompt 正文
+    PROJECT_PROMPT = "project_prompt"    # 项目提示词（调用方显式传入，非文件系统自动读取）
+    SYSTEM_PROMPT = "system_prompt"      # agent 自己的 system_prompt 正文（来自 definitions/<name>/AGENT.md body）
     GUARDRAILS = "guardrails"            # 通用诚实约束 + 写操作前置检查
     TOOL_REFERENCES = "tool_references"  # 内建工具 prompt() 汇总
 
@@ -76,7 +79,27 @@ def render_env_info() -> str:
     )
 
 
-# ── AGENT.md 读取（含 @include 支持）──────────────────────────────────────
+def render_project_prompt(project_prompt: Optional[str]) -> str:
+    """
+    把调用方显式传入的"项目提示词"字符串包装成 system prompt 的一段。
+
+    参数：
+      project_prompt:
+        - None / 空串 / 全空白 → 返回空串（该层整段跳过，不打扰 LLM）
+        - 非空字符串 → 返回 `[项目提示词]\\n<trimmed content>`
+
+    本函数**不会**读取任何文件；如需从 md 文件载入并展开 @include，请用
+    `load_project_prompt_from_file()` 先把内容读成字符串再传入。
+    """
+    if not project_prompt:
+        return ""
+    content = project_prompt.strip()
+    if not content:
+        return ""
+    return f"[项目提示词]\n{content}"
+
+
+# ── 项目提示词文件加载（独立 helper；框架不会主动调用） ─────────────────
 
 def _read_md_file(path: Path, *, _depth: int = 0) -> str:
     """
@@ -101,26 +124,21 @@ def _read_md_file(path: Path, *, _depth: int = 0) -> str:
     return re.sub(r"^@include\s+(.+)$", _resolve_include, text, flags=re.MULTILINE)
 
 
-def load_project_agent_md() -> str:
+def load_project_prompt_from_file(path: str | os.PathLike) -> str:
     """
-    加载项目级 AGENT.md：位于当前工作目录（`Path.cwd()`）。
+    从文件加载项目提示词的字符串内容（支持 `@include path` 递归展开）。
 
-    约定：
-      - 用户可通过 `/init` 在项目根一键生成模板
-      - 内容会注入到每个 agent 的 system prompt（标 `[项目配置 AGENT.md]` 前缀）
-      - 找不到 / 内容为空 → 返回空串，整段跳过，不打扰 LLM
-      - 支持 `@include path`（相对当前文件所在目录解析，最多递归 3 层）
+    用途：CLI `--project-prompt-file`、Web UI "从文件导入"按钮、Python API
+    调用方需要"把文件当项目提示词"时，统一走这个 helper —— 它只负责 I/O，
+    不负责任何 prompt 渲染；拿到 str 后应传给 `render_project_prompt` 或作为
+    `project_prompt` 参数传入 AgentLoop。
 
-    设计权衡：早期版本从 whalefall 包根读，pip install 后就与 `/init` 行为脱节。
-    现统一为 cwd —— 谁调用 whalefall、谁的项目根提供配置。
+    文件不存在 / 读失败 / 内容为空 → 返回空字符串，由调用方决定后续行为。
     """
-    md = Path.cwd() / "AGENT.md"
-    if not md.exists():
+    p = Path(path)
+    if not p.exists() or not p.is_file():
         return ""
-    content = _read_md_file(md)
-    if not content:
-        return ""
-    return f"[项目配置 AGENT.md]\n{content}"
+    return _read_md_file(p)
 
 
 def collect_tool_references(registry: Any) -> str:
@@ -152,6 +170,7 @@ __all__ = [
     "BASE_IDENTITY",
     "BEHAVIOR_GUARDRAILS",
     "render_env_info",
-    "load_project_agent_md",
+    "render_project_prompt",
+    "load_project_prompt_from_file",
     "collect_tool_references",
 ]

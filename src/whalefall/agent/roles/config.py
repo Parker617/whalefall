@@ -52,7 +52,7 @@ def is_write_tool(tool_name: str) -> bool:
 DEFAULT_INCLUDE: tuple[PromptPart, ...] = (
     PromptPart.BASE_IDENTITY,
     PromptPart.ENV_INFO,
-    PromptPart.AGENT_MD,
+    PromptPart.PROJECT_PROMPT,
     PromptPart.SYSTEM_PROMPT,
     PromptPart.GUARDRAILS,
     PromptPart.TOOL_REFERENCES,
@@ -83,8 +83,10 @@ class AgentConfig:
           - [...] = 路径前缀白名单；以 "/" 结尾为目录前缀（含嵌套），不以 "/" 结尾为精确 skill 名
 
     系统提示词装配：
-      - system_prompt  : Agent 独有的系统提示词正文（取自 AGENT.md body）
+      - system_prompt  : Agent 独有的系统提示词正文（取自 definitions/<name>/AGENT.md body）
       - include        : PromptPart 顺序列表，控制最终 system prompt 由哪些积木拼成
+                         （注意 PromptPart.PROJECT_PROMPT 的数据源是运行时显式传入的
+                          project_prompt 参数，不会从任何文件系统位置自动读取）
     """
     name: str
     description: str = ""

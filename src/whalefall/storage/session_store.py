@@ -3,7 +3,8 @@
 SessionStore：会话历史持久化（SQLite）。
 
 - 跨进程会话续跑能力
-- 最小 schema：session_id + messages_json + updated_at
+- Schema：session_id + messages_json + project_prompt + updated_at
+  （project_prompt 用于持久化 Layer 3 项目提示词，Web UI 刷新/CLI 重连后能复用）
 - 容量治理：TTL / 最大会话数 / 每会话消息上限 / DB 体积上限
 """
 from __future__ import annotations
@@ -81,6 +82,7 @@ class SessionStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                # 保留 project_prompt：仅更新 messages_json 和 updated_at
                 conn.execute(
                     """
                     INSERT INTO sessions(session_id, messages_json, updated_at)
@@ -149,6 +151,69 @@ class SessionStore:
 
     def clear_session(self, session_id: str) -> None:
         self.save_session(session_id, [])
+
+    # ------------------------------------------------------------------ #
+    #                   项目提示词（Layer 3）持久化                         #
+    # ------------------------------------------------------------------ #
+    def load_project_prompt(self, session_id: str) -> Optional[str]:
+        """取该会话上次保存的项目提示词；无记录或空串返回 None。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT project_prompt FROM sessions WHERE session_id = ?", (sid,)
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        value = row[0]
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def save_project_prompt(self, session_id: str, project_prompt: Optional[str]) -> None:
+        """
+        保存会话的项目提示词。
+          - 非空串 → 写入；
+          - None / 空白 → 清空该列（NULL），等同"取消本 session 的项目提示词"。
+        本方法不触碰 messages_json；若 session 不存在则自动 upsert 空消息行。
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        normalized: Optional[str] = None
+        if project_prompt is not None:
+            stripped = str(project_prompt).strip()
+            normalized = stripped or None
+        now = _now_ts()
+        with self._session_lock(sid):
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    INSERT INTO sessions(session_id, messages_json, project_prompt, updated_at)
+                    VALUES(?, '[]', ?, ?)
+                    ON CONFLICT(session_id)
+                    DO UPDATE SET project_prompt=excluded.project_prompt, updated_at=excluded.updated_at
+                    """,
+                    (sid, normalized, now),
+                )
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                _logger.warning("session save_project_prompt failed | sid=%s err=%s", sid, exc)
+                raise
+            finally:
+                conn.close()
 
     def delete_older_than(self, days: int) -> int:
         """删除 N 天前更新的所有会话，返回删除数量。"""
@@ -295,15 +360,22 @@ class SessionStore:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS sessions (
-                        session_id    TEXT PRIMARY KEY,
-                        messages_json TEXT NOT NULL,
-                        updated_at    INTEGER NOT NULL
+                        session_id     TEXT PRIMARY KEY,
+                        messages_json  TEXT NOT NULL,
+                        project_prompt TEXT,
+                        updated_at     INTEGER NOT NULL
                     )
                     """
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)"
                 )
+                # 老库迁移：已有表但无 project_prompt 列时补上
+                existing_cols = {
+                    row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+                }
+                if "project_prompt" not in existing_cols:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN project_prompt TEXT")
                 conn.commit()
             finally:
                 conn.close()
