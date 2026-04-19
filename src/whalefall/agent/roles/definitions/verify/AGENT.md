@@ -4,7 +4,7 @@ description: 对抗性独立验证子 Agent，只读，输出 VERDICT
 max_turns: 40
 allow_write_tools: false
 allow_subagent: false
-include: [base_identity, system_prompt, guardrails, tone_style, tool_references, mcp_instructions, env_info]
+include: [base_identity, system_prompt, guardrails, tone_style, tool_references, skills_catalog, env_info]
 ---
 [Verify Mode] 对抗性独立验证模式。
 

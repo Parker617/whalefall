@@ -5,19 +5,21 @@
   - 默认 general agent 装配后含 BASE_IDENTITY / ENV_INFO / GUARDRAILS /
     TONE_STYLE / TOOL 块
   - `custom_base` 参数整体替换 BASE_IDENTITY 并跳过 ENV_INFO
-  - render_system_prompt 不会读取任何文件（零文件嗅探不变量）
+  - render_system_prompt 不会读取非 skill 的任何文件（零嗅探不变量）
   - ENV_INFO 输出 <env>...</env> XML 包裹，且被隔离在 dynamic 段（末尾）
   - <system-reminder> 标签约定与 wrap_system_reminder 行为
-  - MCP server instructions 聚合（collect_mcp_instructions）
+  - SKILLS_CATALOG 扫 `src/whalefall/skills/**/SKILL.md` 渲染索引
   - 子 agent（explore/plan/verify/echo-tester）默认能装配不抛错
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
 from whalefall.agent.roles import (
     PromptPart,
-    collect_mcp_instructions,
+    collect_skills_catalog,
     get_agent,
     load_agents,
     render_env_info,
@@ -77,21 +79,40 @@ def test_env_info_appends_model_line_when_model_given() -> None:
     assert "powered by the model `qwen-max`" in out
 
 
-def test_render_system_prompt_does_not_read_any_file(monkeypatch) -> None:
-    """零嗅探回归：render_system_prompt 内部绝不做磁盘 I/O。
-    允许 load_agents() 在启动阶段读 AGENT.md（这是定义装载，不是嗅探）；
-    但一旦 AgentConfig 就绪，渲染 system prompt 不允许再碰磁盘。
-    注意：env_info 里会通过 subprocess 调用 `git rev-parse` 探测 is-git-repo，
-    这不走 Path.read_text，因此与"零文件嗅探"互不冲突。
+def test_render_system_prompt_only_touches_skill_files(monkeypatch) -> None:
+    """
+    零嗅探（修订版）：render_system_prompt 只允许读 `src/whalefall/skills/` 下的
+    SKILL.md；其他路径的 read_text 都视为"文件嗅探"回归。
+
+    说明：原先版本完全禁止磁盘 I/O，但 SKILLS_CATALOG 需要扫 SKILL.md；
+    所以把限制收敛到"仅 skills 目录"。env_info 的 `git rev-parse` 走 subprocess，
+    不经 Path.read_text，仍与此不变量互不冲突。
     """
     import pathlib
 
     agent = get_agent("general")
+    skills_root = (Path(__file__).resolve().parents[1] / "skills").resolve()
+    original_read_text = pathlib.Path.read_text
 
-    def _boom(*_a, **_kw):
-        raise AssertionError("render_system_prompt leaked file I/O")
+    def _guarded_read_text(self, *a, **kw):
+        try:
+            resolved = self.resolve()
+        except Exception:
+            resolved = self
+        # 只允许读 skills/**/SKILL.md
+        try:
+            resolved.relative_to(skills_root)
+        except ValueError:
+            raise AssertionError(
+                f"render_system_prompt leaked file I/O outside skills/: {self}"
+            )
+        if resolved.name != "SKILL.md":
+            raise AssertionError(
+                f"render_system_prompt read non-SKILL.md under skills/: {self}"
+            )
+        return original_read_text(self, *a, **kw)
 
-    monkeypatch.setattr(pathlib.Path, "read_text", _boom)
+    monkeypatch.setattr(pathlib.Path, "read_text", _guarded_read_text)
     out = render_system_prompt(agent, registry=None)
     assert "你是专业的 AI 助手" in out
 
@@ -138,56 +159,58 @@ def test_wrap_system_reminder_empty_returns_empty() -> None:
     assert wrap_system_reminder("   ", title="x") == ""
 
 
-# ── MCP instructions 聚合 ──────────────────────────────────────────────
+# ── SKILLS_CATALOG（仿 CC Agent Skills）────────────────────────────────
 
-class _FakeMCPClient:
-    def __init__(self, instructions_map):
-        self._m = instructions_map
-
-    def list_instructions(self, servers=None):
-        if servers is None:
-            return list(self._m.items())
-        if not servers:
-            return []
-        return [(n, t) for n, t in self._m.items() if n in set(servers)]
-
-
-def test_collect_mcp_instructions_none_client_returns_empty() -> None:
-    assert collect_mcp_instructions(None) == ""
+def test_collect_skills_catalog_from_real_repo_has_entries() -> None:
+    """
+    仓库内置 skills/demo/nested/{alpha,beta}/SKILL.md + skills/general/weather/SKILL.md，
+    collect_skills_catalog 应能产出非空索引并给出正确的 "name — description (path)" 行。
+    """
+    out = collect_skills_catalog()
+    assert out, "skills/ 目录下有 SKILL.md 时 catalog 不能为空"
+    assert "[可用 Skills]" in out
+    # 至少命中一条内置 demo skill
+    assert "demo/nested/alpha" in out or "demo/nested/beta" in out
+    # 指路径必须能直接给 read 工具用（POSIX 相对仓库根）
+    assert "src/whalefall/skills/" in out
 
 
-def test_collect_mcp_instructions_aggregates_all_by_default() -> None:
-    client = _FakeMCPClient({"alpha": "use alpha like this", "beta": "beta rules"})
-    out = collect_mcp_instructions(client)
-    assert "[MCP Server 使用说明]" in out
-    assert "## alpha" in out and "use alpha like this" in out
-    assert "## beta" in out and "beta rules" in out
+def test_collect_skills_catalog_empty_root(tmp_path: Path) -> None:
+    assert collect_skills_catalog(skills_root=tmp_path) == ""
 
 
-def test_collect_mcp_instructions_whitelist() -> None:
-    client = _FakeMCPClient({"alpha": "A", "beta": "B", "gamma": "C"})
-    out = collect_mcp_instructions(client, allowed_servers=["alpha", "gamma"])
-    assert "## alpha" in out and "## gamma" in out
-    assert "## beta" not in out
-
-
-def test_collect_mcp_instructions_empty_whitelist_returns_empty() -> None:
-    client = _FakeMCPClient({"alpha": "A"})
-    assert collect_mcp_instructions(client, allowed_servers=[]) == ""
-
-
-def test_render_system_prompt_with_mcp_instructions_in_static() -> None:
-    """MCP 使用说明属于静态块，应出现在 <env> 之前。"""
-    agent = get_agent("general")
-    client = _FakeMCPClient({"demo": "call demo__echo with text"})
-    out = render_system_prompt(agent, registry=None, mcp_client=client)
-    assert "[MCP Server 使用说明]" in out
-    idx_mcp = out.find("[MCP Server 使用说明]")
-    idx_env = out.find("<env>")
-    assert 0 <= idx_mcp < idx_env
-
-    static_part, dyn_part = render_system_prompt_split(
-        agent, registry=None, mcp_client=client
+def test_collect_skills_catalog_custom_root(tmp_path: Path) -> None:
+    (tmp_path / "foo" / "bar").mkdir(parents=True)
+    (tmp_path / "foo" / "bar" / "SKILL.md").write_text(
+        "---\ndescription: fake skill\n---\nbody here\n",
+        encoding="utf-8",
     )
-    assert "[MCP Server 使用说明]" in static_part
+    out = collect_skills_catalog(skills_root=tmp_path)
+    assert "[可用 Skills]" in out
+    assert "foo/bar" in out
+    assert "fake skill" in out
+
+
+def test_render_system_prompt_contains_skills_catalog_in_static() -> None:
+    """SKILLS_CATALOG 属于静态块，应出现在 <env> 之前。"""
+    agent = get_agent("general")
+    static_part, dyn_part = render_system_prompt_split(agent, registry=None)
+    assert "[可用 Skills]" in static_part
     assert "<env>" in dyn_part
+
+
+def test_render_system_prompt_mcp_client_does_not_affect_prompt() -> None:
+    """
+    MCP 通道已纯化：system prompt 里不再聚合 server-level instructions，无论是否
+    传入 mcp_client，渲染结果都完全一致。
+    """
+    agent = get_agent("general")
+
+    class _FakeMCPClient:
+        def list_tools(self, servers=None):  # pragma: no cover - 不应被调用
+            return []
+
+    out_no_mcp = render_system_prompt(agent, registry=None, mcp_client=None)
+    out_with_mcp = render_system_prompt(agent, registry=None, mcp_client=_FakeMCPClient())
+    assert out_no_mcp == out_with_mcp
+    assert "[MCP Server 使用说明]" not in out_no_mcp

@@ -208,7 +208,7 @@ class ContextManager:
         1. 保留最近 RECENT_PROTECT_ROUNDS 轮完整不动
         2. 超出范围的旧轮次：
            a) 仅对 COMPACTABLE_TOOLS 白名单工具的结果截断
-              （轻型工具如 todo_write/skill/agent 结果完整保留）
+              （轻型工具如 todo_write/agent 结果完整保留）
            b) 时间标记截断（TIME_BASED_MC）：携带 _ts 元数据且超过阈值的结果清空
            c) 通过 assistant.tool_calls 建立 tool_call_id -> tool_name 映射，
               避免会话持久化后 tool 消息缺失 name 导致“全量误截断”

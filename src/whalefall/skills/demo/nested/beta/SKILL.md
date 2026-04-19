@@ -1,13 +1,12 @@
 ---
-description: Demo skill "beta" — sibling of alpha; both live under demo/nested/ to showcase multi-skill directory filtering.
+description: Demo skill "beta" — sibling of alpha; both live under demo/nested/ to showcase arbitrarily nested SKILL.md discovery.
 ---
 
 # Demo Beta
 
 Placeholder skill at `skills/demo/nested/beta/`, sibling of
-`demo/nested/alpha/`.
-
-Together with alpha, this pair demonstrates that `allowed_skill_paths=["demo/nested/"]`
-grants access to every skill directly or indirectly beneath `nested/`.
+`demo/nested/alpha/`. Together they demonstrate that `collect_skills_catalog()`
+recursively finds every `SKILL.md` under `src/whalefall/skills/`, regardless of
+nesting depth.
 
 Replace with real SOP content when you need a real skill.

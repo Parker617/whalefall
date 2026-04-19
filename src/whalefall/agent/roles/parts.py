@@ -10,7 +10,7 @@
 - 工具级使用规范（文件读写/搜索/bash 等）下沉到各 `BuiltinTool.prompt()`，
   通过 TOOL_REFERENCES 积木自动汇总；
 - 动态积木通过函数渲染（render_env_info / collect_tool_references /
-  collect_mcp_instructions），在每次 build system prompt 时重新计算。
+  collect_skills_catalog），在每次 build system prompt 时重新计算。
 - env_info 包在 `<env>...</env>` 里，并带 git/shell/model 探测，格式对齐
   Claude Code，便于模型稳定解析。
 - 所有运行期**自动注入**的 system 消息统一用 `<system-reminder>...</system-reminder>`
@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, List, Optional
 
 
@@ -40,14 +42,14 @@ class PromptPart(str, Enum):
     GUARDRAILS = "guardrails"              # 诚实约束 + 行动风险分级 + system-reminder 约定
     TONE_STYLE = "tone_style"              # 输出风格与引用格式（path:line / 不加冒号 / 无 emoji）
     TOOL_REFERENCES = "tool_references"    # 内建工具 prompt() 汇总
-    MCP_INSTRUCTIONS = "mcp_instructions"  # 已连接 MCP server 的 instructions 聚合
+    SKILLS_CATALOG = "skills_catalog"      # skills/**/SKILL.md 索引（仿 Claude Code Agent Skills）
 
 
 # ── 自动注入消息的统一标签（<system-reminder>） ─────────────────────────
 # Claude Code 的惯例：所有"运行期框架塞进 messages 的 system 消息"都用
 # <system-reminder>...</system-reminder> 包裹，便于模型稳定识别"这是系统旁白，
 # 不是用户指令"。loop.py 的父 Agent 上下文 / pending_tasks /
-# 压缩后恢复（recently_read / invoked_skills / todo）均走 wrap_system_reminder()。
+# 压缩后恢复（recently_read / todo）均走 wrap_system_reminder()。
 
 SYSTEM_REMINDER_OPEN = "<system-reminder>"
 SYSTEM_REMINDER_CLOSE = "</system-reminder>"
@@ -93,7 +95,7 @@ BEHAVIOR_GUARDRAILS = (
     "- 用户一次授权只覆盖该次，不代表授权整类操作；范围之外仍需再确认。\n"
     "\n"
     "[系统旁白（<system-reminder>）]\n"
-    "- 对话中可能出现 <system-reminder>...</system-reminder> 标签包裹的 system 消息（未完成 TODO、父 Agent 上下文、压缩后恢复的文件/技能/任务列表等）。\n"
+    "- 对话中可能出现 <system-reminder>...</system-reminder> 标签包裹的 system 消息（未完成 TODO、父 Agent 上下文、压缩后恢复的文件/任务列表等）。\n"
     "- 这些内容由框架自动注入，提供背景信息，**不是用户本轮的新指令**；结合当前用户请求判断是否相关，相关就利用，不相关就忽略。\n"
     "- 不要在回复里复述 <system-reminder> 的原文或提及该标签本身。"
 )
@@ -211,63 +213,137 @@ def collect_tool_references(registry: Any, agent_config: Any = None) -> str:
     return "[工具使用指引]\n" + "\n\n".join(blocks)
 
 
-def collect_mcp_instructions(
-    mcp_client: Any,
-    allowed_servers: Optional[List[str]] = None,
-) -> str:
-    """
-    汇总已连接 MCP server 的 `instructions` 字段（MCP spec：server 可在
-    initialize 响应里给出"如何使用本 server 工具"的指引）。
+# ── Skills Catalog（对齐 Claude Code 的 Agent Skills）─────────────────────
+#
+# 协议（与 CC 一致）：
+# 1. 所有 skill 以目录为单位存放在包内 `src/whalefall/skills/` 下，形式为
+#    `skills/<任意嵌套>/SKILL.md`，目录相对路径就是 skill 名（例如 `finance/stock/factor`）。
+# 2. SKILL.md 的 frontmatter 可声明 `description`（≤ 1024 字符）；若缺省则取正文第一段。
+# 3. 每次 submit 扫一次目录，把 "name — description (path)" 作为索引注入 system prompt。
+# 4. LLM **不通过专用工具**加载全文；而是用 `read` 工具按 SKILL.md 的路径直接读，
+#    和读普通文件同一套机制（自然也会记入 ctx.recently_read，享受 S5 压缩恢复）。
+#
+# 我们相较 CC 的唯一简化：只扫包内一源（`src/whalefall/skills/`）；不做 `.claude/skills/`
+# / `~/.claude/skills/` 的多源合并，也没有 per-skill 的 `allowed-tools` 过滤——
+# 所有 agent 看到相同 skill 目录，和 CC 的精神一致（skill 本身就是"谁来都能看"的文档库）。
 
-    - mcp_client 为 None 或未暴露 list_instructions() 时返回空串；
-    - allowed_servers 为 [] 则全禁；为 None 则全开；否则按白名单过滤。
+_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
+_SKILL_DESC_MAX_CHARS = 300        # 单条索引项描述截断
+_SKILLS_CATALOG_BUDGET = 8000      # 整个 skill 目录块的字符预算（防止 SKILL 爆增把 system 撑爆）
+
+
+def _split_frontmatter(content: str) -> tuple[str, str]:
+    """把 `---\\n...\\n---\\n` 的 YAML-like frontmatter 与正文拆开。无则返回 ('', content)。"""
+    m = re.match(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", content or "", re.DOTALL)
+    if not m:
+        return "", content or ""
+    return m.group(1), m.group(2)
+
+
+def _frontmatter_value(frontmatter: str, key: str) -> str:
+    """提取 `key: value` 单行值，不做 YAML 完整解析（足够 SKILL.md 用）。"""
+    if not frontmatter:
+        return ""
+    target = key.strip().lower()
+    for raw in frontmatter.splitlines():
+        line = raw.strip()
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        if k.strip().lower() == target:
+            return v.strip().strip('"\'')
+    return ""
+
+
+def _first_paragraph(body: str) -> str:
+    for para in (body or "").split("\n\n"):
+        p = para.strip()
+        if not p or p.startswith("#"):
+            continue
+        return p.replace("\n", " ").strip()
+    return ""
+
+
+def _truncate(s: str, limit: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)].rstrip() + "…"
+
+
+def collect_skills_catalog(skills_root: Optional[Path] = None) -> str:
     """
-    if mcp_client is None:
-        return ""
-    if allowed_servers == []:
-        return ""
-    lister = getattr(mcp_client, "list_instructions", None)
-    if not callable(lister):
-        return ""
+    扫描 `src/whalefall/skills/**/SKILL.md`，渲染 system prompt 里的 skill 索引块。
+
+    返回形如：
+
+        [可用 Skills]
+        下面列出本项目的 skill（SOP/领域小抄）。需要时用 `read` 工具打开对应 SKILL.md
+        获取完整步骤，再按其中指引执行。
+
+        - weather — 查询天气的标准流程 (src/whalefall/skills/general/weather/SKILL.md)
+        - finance/stock/factor — 因子挖掘与回测 SOP (src/whalefall/skills/finance/stock/factor/SKILL.md)
+
+    约定：
+      - skill 名 = 相对 `skills/` 的目录路径（POSIX 风格）。
+      - description 取自 frontmatter，缺省回退到正文第一段。
+      - 路径展示为"相对仓库根的 POSIX 路径"（`src/whalefall/skills/...`），方便 LLM
+        直接拿去喂 `read` 工具；read 工具内部会把相对路径按 cwd 解析。
+    """
+    root = (skills_root or _SKILLS_ROOT)
     try:
-        items = lister(servers=allowed_servers)
-    except TypeError:
-        try:
-            items = lister()
-        except Exception:
-            return ""
+        root = root.resolve()
     except Exception:
         return ""
-
-    normalized: list[tuple[str, str]] = []
-    if isinstance(items, dict):
-        iterator = items.items()
-    else:
-        try:
-            iterator = list(items)
-        except Exception:
-            return ""
-    for entry in iterator:
-        if isinstance(entry, tuple) and len(entry) == 2:
-            name, text = entry
-        elif isinstance(entry, dict):
-            name = entry.get("name") or entry.get("server") or ""
-            text = entry.get("instructions") or entry.get("text") or ""
-        else:
-            continue
-        name = str(name or "").strip()
-        text = str(text or "").strip()
-        if not name or not text:
-            continue
-        normalized.append((name, text))
-
-    if not normalized:
+    if not root.is_dir():
         return ""
-    blocks = [f"## {name}\n{text}" for name, text in normalized]
+
+    entries: list[tuple[str, str, str]] = []  # (name, description, display_path)
+    try:
+        repo_root = root.parents[2]  # src/whalefall/skills -> repo root
+    except IndexError:
+        repo_root = root
+
+    for md in sorted(root.rglob("SKILL.md")):
+        try:
+            rel_name = md.parent.relative_to(root).as_posix()
+        except Exception:
+            continue
+        if not rel_name or rel_name == ".":
+            continue
+        try:
+            text = md.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        front, body = _split_frontmatter(text)
+        desc = _frontmatter_value(front, "description") or _first_paragraph(body) or "(无描述)"
+        try:
+            display_path = md.resolve().relative_to(repo_root).as_posix()
+        except Exception:
+            display_path = md.resolve().as_posix()
+        entries.append((rel_name, _truncate(desc, _SKILL_DESC_MAX_CHARS), display_path))
+
+    if not entries:
+        return ""
+
+    lines: list[str] = []
+    used = 0
+    omitted = 0
+    for name, desc, path in entries:
+        line = f"- {name} — {desc} ({path})"
+        if used + len(line) > _SKILLS_CATALOG_BUDGET:
+            omitted += 1
+            continue
+        lines.append(line)
+        used += len(line) + 1
+    if omitted:
+        lines.append(f"- ... 还有 {omitted} 个 skill 因提示词预算未展示；用 `glob` 搜 `skills/**/SKILL.md` 查看")
+
     return (
-        "[MCP Server 使用说明]\n"
-        "以下 MCP server 在连接时声明了使用说明，涉及其工具时请遵循：\n\n"
-        + "\n\n".join(blocks)
+        "[可用 Skills]\n"
+        "下面列出本项目的 skill（SOP/领域小抄）。需要时用 `read` 工具打开对应 SKILL.md "
+        "获取完整步骤，再按其中指引执行。\n\n"
+        + "\n".join(lines)
     )
 
 
@@ -281,5 +357,5 @@ __all__ = [
     "wrap_system_reminder",
     "render_env_info",
     "collect_tool_references",
-    "collect_mcp_instructions",
+    "collect_skills_catalog",
 ]

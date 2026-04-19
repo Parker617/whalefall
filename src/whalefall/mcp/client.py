@@ -88,10 +88,6 @@ class MCPClient:
         self._tools: List[Dict[str, Any]] = []
         self._tool_map: Dict[str, Tuple[str, str]] = {}    # api_name → (server, mcp_name)
         self._tool_meta: Dict[str, Dict[str, Any]] = {}
-        # MCP spec：每个 server 可在 initialize 响应里声明 instructions 字段，
-        # 指导客户端/模型如何使用它暴露的工具。存下来，后续由
-        # `agent.roles.collect_mcp_instructions` 聚合进 system prompt。
-        self._server_instructions: Dict[str, str] = {}
         self._exit_stack = AsyncExitStack()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -176,7 +172,6 @@ class MCPClient:
         self._tools.clear()
         self._tool_map.clear()
         self._tool_meta.clear()
-        self._server_instructions.clear()
         self._thread = None
         self._loop = None
         self._stop_requested = None
@@ -196,29 +191,6 @@ class MCPClient:
             return list(self._tools)
         server_set = set(servers)
         return [t for t in self._tools if t.get("_server") in server_set]
-
-    def list_instructions(
-        self, servers: Optional[List[str]] = None
-    ) -> List[Tuple[str, str]]:
-        """
-        返回已连接 MCP server 的 instructions 列表：[(server_name, instructions), ...]。
-
-        Args:
-            servers: None = 全部；空列表 = 返回空；其它 = 白名单过滤。
-                     与 list_tools 的语义保持一致（None 当作"全部"）。
-        """
-        if servers is None:
-            items = list(self._server_instructions.items())
-        elif not servers:
-            return []
-        else:
-            server_set = set(servers)
-            items = [
-                (name, text)
-                for name, text in self._server_instructions.items()
-                if name in server_set
-            ]
-        return [(name, text) for name, text in items if text and text.strip()]
 
     def server_names(self) -> List[str]:
         """返回所有已连接的 server 名称列表。"""
@@ -325,16 +297,11 @@ class MCPClient:
             raise ValueError(f"Unknown transport type: {transport_type}")
 
         session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-        init_result = await session.initialize()
+        # MCP spec 保留初始化握手；我们不消费 InitializeResult.instructions——
+        # 对齐 "MCP 只走协议" 的设计，不把 server 侧的自述文本塞进 system prompt，
+        # LLM 通过每个工具 schema 自带的 description 就能正确调用。
+        await session.initialize()
         self._sessions[name] = session
-        # MCP spec: InitializeResult.instructions 为可选字符串，server 用来
-        # 告诉客户端"我的工具怎么用"；捕获起来供 system prompt 聚合。
-        try:
-            raw_instr = getattr(init_result, "instructions", None)
-            if isinstance(raw_instr, str) and raw_instr.strip():
-                self._server_instructions[name] = raw_instr.strip()
-        except Exception:
-            pass
 
         response = await session.list_tools()
         for tool in response.tools:
@@ -390,7 +357,6 @@ class MCPClient:
         for k in [k for k, v in self._tool_map.items() if v[0] == server_name]:
             del self._tool_map[k]
             self._tool_meta.pop(k, None)
-        self._server_instructions.pop(server_name, None)
         await self._connect_server(server_name, cfg)
         logger.info("Reconnected to server '%s'", server_name)
 

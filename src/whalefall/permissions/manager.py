@@ -72,7 +72,7 @@ class PermissionLevel(str, Enum):
 # 避免出现 “既允许又询问” 的配置冲突（Step 3 会先于 Step 7 命中）。
 _DEFAULT_ALLOW_TOOLS: frozenset[str] = frozenset({
     "read", "glob", "grep", "agent",
-    "web_search", "skill",
+    "web_search",
     # 增量式任务管理工具族
     "task_create", "task_update", "task_get", "task_list",
     # 规划模式切换是纯控制，读/写状态均不落盘

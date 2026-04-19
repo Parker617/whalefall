@@ -21,7 +21,7 @@ from whalefall.agent.roles.parts import (
     BEHAVIOR_GUARDRAILS,
     TONE_STYLE,
     PromptPart,
-    collect_mcp_instructions,
+    collect_skills_catalog,
     collect_tool_references,
     render_env_info,
 )
@@ -117,7 +117,6 @@ def _load_one(agent_md: Path) -> Optional[AgentConfig]:
         allow_write_tools=_parse_bool(meta.get("allow_write_tools", ""), True),
         allow_subagent=_parse_bool(meta.get("allow_subagent", ""), True),
         allowed_mcp_servers=_three_state("allowed_mcp_servers"),
-        allowed_skill_paths=_three_state("allowed_skill_paths"),
         system_prompt=body,
         include=include,
     )
@@ -170,7 +169,7 @@ def render_system_prompt_split(
     把 system prompt 拆成 (static_prefix, dynamic_suffix)。
 
     - **static_prefix**：每次装配字节稳定的部分（身份 / agent body / 守则 /
-      风格 / 工具使用指引 / MCP server 使用说明）。LLM provider 的 prompt cache
+      风格 / 工具使用指引 / Skills 目录索引）。LLM provider 的 prompt cache
       可以把它当成长前缀命中。
     - **dynamic_suffix**：每次装配都会变（ENV_INFO 带日期时间、git/model 等）。
       放在最后，不会破坏前缀缓存。
@@ -201,12 +200,10 @@ def render_system_prompt_split(
             tr = collect_tool_references(registry, agent_config=agent)
             if tr:
                 static_parts.append(tr)
-        elif part == PromptPart.MCP_INSTRUCTIONS:
-            mi = collect_mcp_instructions(
-                mcp_client, allowed_servers=agent.allowed_mcp_servers
-            )
-            if mi:
-                static_parts.append(mi)
+        elif part == PromptPart.SKILLS_CATALOG:
+            sc = collect_skills_catalog()
+            if sc:
+                static_parts.append(sc)
 
     static_prefix = "\n\n".join(p for p in static_parts if p)
     dynamic_suffix = "\n\n".join(p for p in dynamic_parts if p)
@@ -229,11 +226,16 @@ def render_system_prompt(
       SYSTEM_PROMPT     → agent.system_prompt（来自 definitions/<name>/AGENT.md body）
       GUARDRAILS        → 诚实约束 + 行动风险分级 + <system-reminder> 约定
       TONE_STYLE        → 输出风格与引用格式（path:line / no emoji / no colon 前置）
-      TOOL_REFERENCES   → 内建工具的 prompt() 汇总
-      MCP_INSTRUCTIONS  → 已连接 MCP server 的 instructions 聚合（按 allowed_mcp_servers 过滤）
+      TOOL_REFERENCES   → 内建工具的 prompt() 汇总（按 allow_write_tools 过滤）
+      SKILLS_CATALOG    → 扫 `src/whalefall/skills/**/SKILL.md` 生成的"name — description (path)"
+                          索引；LLM 用 `read` 工具按路径读正文（不经专用 skill 工具）
       ENV_INFO          → 当前环境信息（日期/cwd/git/shell/platform/model）——动态块，
                           被 `render_system_prompt_split` 隔离在末尾，利于 provider 端
                           prompt cache 命中静态前缀。
+
+    关于 MCP：MCP 只走协议。每次 submit 由 AgentLoop 调 `mcp_client.list_tools()`
+    拉工具 schema（含各工具自己的 description）进 `tools=[...]`；system prompt 里
+    **不注入** server-level 的 instructions 文本，保持 MCP 通道纯净。
 
     设计说明：
       要针对某个任务/节点**整体替换身份**（如量化分析节点），用

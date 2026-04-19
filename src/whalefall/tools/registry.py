@@ -28,7 +28,7 @@ class ToolRegistry:
     内建工具注册表：仅管理进程内直接执行的内建工具。
 
     工具名规范：
-    - 内建工具：bash / read / write / edit / glob / grep / web_fetch / skill / agent 等
+    - 内建工具：bash / read / write / edit / glob / grep / web_fetch / agent 等
 
     MCP 工具不在此注册表中，由 AgentLoop 通过 MCPClient.list_tools() 获取。
     """
@@ -113,7 +113,6 @@ class ToolRegistry:
 
 def build_default_registry(
     include_agent_tool: bool = True,
-    include_skill_tool: bool = True,
     include_web_search: bool = True,
     include_web_browser: bool = True,
     include_notebook_edit: bool = True,
@@ -128,7 +127,6 @@ def build_default_registry(
 
     Args:
         include_agent_tool:  是否包含 AgentTool（子 agent 派生）
-        include_skill_tool:  是否包含 SkillTool（按需加载技能全文）
         include_web_search:  是否包含 WebSearchTool（网络搜索）
         include_web_browser: 是否包含 WebBrowserTool（Playwright 浏览器访问）
         include_notebook_edit: 是否包含 NotebookEditTool（.ipynb 结构化编辑）
@@ -137,6 +135,10 @@ def build_default_registry(
 
     Returns:
         已注册所有内建工具的 ToolRegistry 实例
+
+    Skill 机制：skill 不是工具——system prompt 里会直接注入 `skills/**/SKILL.md` 目录
+    清单（见 `agent.roles.parts.collect_skills_catalog`），LLM 通过 `read` 工具按需
+    打开对应 SKILL.md 读正文，与 Claude Code 的 "Agent Skills" 协议一致。
     """
     from whalefall.tools.bash import BashTool
     from whalefall.tools.read import ReadTool
@@ -175,10 +177,6 @@ def build_default_registry(
         registry.register_builtin(TaskUpdateTool())
         registry.register_builtin(TaskGetTool())
         registry.register_builtin(TaskListTool())
-
-    if include_skill_tool:
-        from whalefall.tools.skill import SkillTool
-        registry.register_builtin(SkillTool())
 
     if include_agent_tool:
         from whalefall.tools.subagent import AgentTool

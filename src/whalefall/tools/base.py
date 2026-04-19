@@ -16,21 +16,18 @@ class ToolContext:
     工具通过此上下文访问注册表、MCP 客户端、LLM 等资源。
 
     agent_name: 当前运行的 Agent 名字（对应 AgentConfig.name），供工具按需调整行为。
-    allowed_skill_paths: 当前 Agent 可见的 skill 路径前缀（None = 全看；[] = 全不看）。
-        由 AgentLoop 从 AgentConfig.allowed_skill_paths 复制到 ctx，供 SkillTool 过滤使用。
     """
     agent_name: str = ""
-    allowed_skill_paths: Optional[List[str]] = None
     tool_registry: Any = None
     mcp_client: Any = None
     llm_client: Any = None
     permission_manager: Any = None
     hook_manager: Any = None
     abort_event: Optional[asyncio.Event] = None
-    # ReadTool 记录最近读取的文件，context 压缩后用于恢复
+    # ReadTool 记录最近读取的文件，context 压缩后用于恢复。
+    # 由于 skill 目录统一用 `read` 工具按 SKILL.md 路径加载，读过的 skill 正文也会被
+    # 记入此列表，压缩后由同一条 reminder 恢复，不需要单独的 skill 通道。
     recently_read: List[Dict[str, Any]] = field(default_factory=list)
-    # SkillTool 记录已调用的 skill，context 压缩后用于恢复
-    invoked_skills: List[Dict[str, Any]] = field(default_factory=list)
     # TaskStore 通过 metadata["_task_store"] 懒加载（增量 CRUD + 持久化）
     # AskUserQuestionTool 回调：(question: str) -> str
     # None 时回退到 input()（CLI 模式）
@@ -87,8 +84,7 @@ class BuiltinTool(abc.ABC):
         """
         返回 OpenAI function 格式的工具 schema。
 
-        agent_config: 可选。支持 agent-aware 的工具（如 SkillTool）在此按
-        AgentConfig 过滤 description/parameters（例如只暴露该 agent 能看到的 skill）。
+        agent_config: 保留入参兼容 agent-aware 工具未来扩展（如按 agent 过滤参数枚举），
         默认实现忽略此参数。
         """
         return {

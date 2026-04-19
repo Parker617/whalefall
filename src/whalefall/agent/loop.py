@@ -44,8 +44,6 @@ logger = get_logger("whalefall.loop")
 DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000
 MAX_RECENTLY_RESTORED_FILES = 5
 MAX_RECENTLY_RESTORED_CHARS = 50_000
-MAX_INVOKED_SKILLS_RESTORED = 4
-MAX_INVOKED_SKILLS_CHARS = 60_000
 
 
 def _default_agent() -> AgentConfig:
@@ -77,7 +75,7 @@ class AgentLoop:
         按 agent_config.include 声明的顺序装配 system prompt。
 
         静态积木（BASE_IDENTITY / SYSTEM_PROMPT / GUARDRAILS / TONE_STYLE /
-        TOOL_REFERENCES / MCP_INSTRUCTIONS）放前面，动态积木（ENV_INFO）放后面，
+        TOOL_REFERENCES / SKILLS_CATALOG）放前面，动态积木（ENV_INFO）放后面，
         便于 LLM 端 prompt cache 命中。完整装配逻辑由
         `whalefall.agent.roles.render_system_prompt()` 统一实现。
 
@@ -268,7 +266,6 @@ class AgentLoop:
         from whalefall.tools.base import ToolContext
         ctx = ToolContext(
             agent_name=agent_config.name,
-            allowed_skill_paths=agent_config.allowed_skill_paths,
             tool_registry=self._registry,
             mcp_client=self._mcp_client,
             llm_client=self.llm,
@@ -319,11 +316,6 @@ class AgentLoop:
                     if restored_msg:
                         self._insert_after_last_system(messages, {"role": "system", "content": restored_msg})
                         rlog.info("restored recently_read files after compaction")
-
-                    invoked_skills_msg = self._build_invoked_skills_restore_message(ctx)
-                    if invoked_skills_msg:
-                        self._insert_after_last_system(messages, {"role": "system", "content": invoked_skills_msg})
-                        rlog.info("restored invoked skills after compaction")
 
                     todo_msg = self._build_todo_restore_message(ctx)
                     if todo_msg:
@@ -1097,41 +1089,6 @@ class AgentLoop:
             "以下为最近读取文件的关键片段（自动恢复，用于延续上下文）：\n"
             + "".join(blocks),
             title="压缩后文件上下文恢复",
-        )
-
-    def _build_invoked_skills_restore_message(self, ctx) -> str:
-        """
-        压缩后恢复已调用过的 skill 全文片段，避免技能上下文丢失。
-        """
-        invoked = ctx.invoked_skills or []
-        if not invoked:
-            return ""
-
-        selected = invoked[-MAX_INVOKED_SKILLS_RESTORED:]
-        budget = MAX_INVOKED_SKILLS_CHARS
-        blocks: List[str] = []
-
-        for entry in reversed(selected):
-            name = str(entry.get("name", "")).strip()
-            path = str(entry.get("path", "")).strip()
-            content = str(entry.get("content", "")).strip()
-            if not name or not content or budget <= 0:
-                continue
-            head = f"\n--- skill: {name} ({path}) ---\n"
-            room = max(0, budget - len(head))
-            if room <= 0:
-                break
-            snippet = content[:room]
-            blocks.append(head + snippet)
-            budget -= len(head) + len(snippet)
-
-        if not blocks:
-            return ""
-        blocks.reverse()
-        return wrap_system_reminder(
-            "以下为本轮前已加载并使用过的 skill 关键内容（自动恢复）：\n"
-            + "".join(blocks),
-            title="压缩后 Skill 上下文恢复",
         )
 
     @staticmethod

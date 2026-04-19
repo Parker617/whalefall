@@ -4,7 +4,7 @@ description: 只读探索子 Agent，专注代码库搜索与分析
 max_turns: 80
 allow_write_tools: false
 allow_subagent: false
-include: [base_identity, system_prompt, guardrails, tone_style, tool_references, mcp_instructions, env_info]
+include: [base_identity, system_prompt, guardrails, tone_style, tool_references, skills_catalog, env_info]
 ---
 [Explore Mode] 只读探索模式，专注代码库搜索与分析。
 

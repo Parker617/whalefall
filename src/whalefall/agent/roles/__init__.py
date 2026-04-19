@@ -29,7 +29,7 @@ from whalefall.agent.roles.parts import (
     wrap_system_reminder,
     render_env_info,
     collect_tool_references,
-    collect_mcp_instructions,
+    collect_skills_catalog,
 )
 from whalefall.agent.roles.loader import (
     load_agents,
@@ -53,7 +53,7 @@ __all__ = [
     "wrap_system_reminder",
     "render_env_info",
     "collect_tool_references",
-    "collect_mcp_instructions",
+    "collect_skills_catalog",
     "load_agents",
     "get_agent",
     "render_system_prompt",

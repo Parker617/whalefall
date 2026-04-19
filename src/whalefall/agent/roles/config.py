@@ -56,7 +56,7 @@ DEFAULT_INCLUDE: tuple[PromptPart, ...] = (
     PromptPart.GUARDRAILS,
     PromptPart.TONE_STYLE,
     PromptPart.TOOL_REFERENCES,
-    PromptPart.MCP_INSTRUCTIONS,
+    PromptPart.SKILLS_CATALOG,
     PromptPart.ENV_INFO,
 )
 
@@ -79,19 +79,21 @@ class AgentConfig:
           - None = 全部 MCP server 可见（默认）
           - []   = 完全禁用 MCP 工具
           - [x, y] = 仅这两个 server 可见
-      - allowed_skill_paths   : 可见 skill 路径前缀列表
-          - None = 全部 skill 可见（默认）
-          - []   = 完全禁用 skill
-          - [...] = 路径前缀白名单；以 "/" 结尾为目录前缀（含嵌套），不以 "/" 结尾为精确 skill 名
 
     系统提示词装配：
       - system_prompt  : Agent 独有的系统提示词正文（取自 definitions/<name>/AGENT.md body）
       - include        : PromptPart 顺序列表，控制最终 system prompt 由哪些积木拼成。
                          默认顺序为 [BASE_IDENTITY, SYSTEM_PROMPT, GUARDRAILS,
-                         TONE_STYLE, TOOL_REFERENCES, MCP_INSTRUCTIONS, ENV_INFO]——
+                         TONE_STYLE, TOOL_REFERENCES, SKILLS_CATALOG, ENV_INFO]——
                          静态块在前、动态块在后，利于 LLM 端 prompt caching 命中。
                          如需完全替换 BASE_IDENTITY，用
                          `AgentLoop.run_*(system_prompt=...)` 入参。
+
+    Skills（仿 Claude Code "Agent Skills"）：
+      skill 不是工具；SKILLS_CATALOG 会把 `src/whalefall/skills/**/SKILL.md` 的
+      "name — description (path)" 索引注入 system prompt，LLM 通过内建 `read`
+      工具按路径读取正文。所有 agent 看到相同 skill 目录（不做 per-agent 过滤），
+      与 CC 的精神一致。
     """
     name: str
     description: str = ""
@@ -101,7 +103,6 @@ class AgentConfig:
     allow_write_tools: bool = True
     allow_subagent: bool = True
     allowed_mcp_servers: Optional[List[str]] = None
-    allowed_skill_paths: Optional[List[str]] = None
 
     system_prompt: str = ""
     include: List[PromptPart] = field(
