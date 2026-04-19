@@ -21,6 +21,8 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from whalefall.storage.session_store import SessionStore
+from whalefall.storage.last_session import record_last_session
+from whalefall.storage.transcripts import append_transcript
 from whalefall.agent.roles import AgentConfig, get_agent
 from whalefall.storage.retention import RuntimeRetention
 
@@ -176,7 +178,6 @@ class QueryEngine:
         user_query: str,
         agent_config: AgentConfig,
         model: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         request_id: Optional[str] = None,
         on_text: Optional[Callable[[str], None]] = None,
         on_tool_start: Optional[Callable[[str, Dict], None]] = None,
@@ -190,27 +191,24 @@ class QueryEngine:
         并发语义：
         - 同一个 session 串行（加 session 级锁，防止并发写历史）
         - 不同 session 并行（锁互不影响）
-
-        project_prompt 语义：
-        - 传入非空字符串 → 本轮使用该项目提示词；同时写回 session_store，
-          供后续同 session 请求（刷新 / 重连 / 续跑）自动复用。
-        - 传入空串 "" → 显式清除该 session 的项目提示词并持久化。
-        - 传入 None（默认） → 从 session_store 读取上次保存的值作为兜底。
         """
         sid = self._normalize_session_id(session_id)
         self.create_session(sid)
         lock = self._get_session_lock(sid)
 
-        effective_prompt = self._resolve_project_prompt(sid, project_prompt)
-
         with lock:
+            # 快照本轮之前的历史；loop 里新产出的 user/assistant/tool 会通过
+            # on_message_commit 即时落盘（write-ahead，对齐 Claude Code）
             history = self.get_session_messages(sid)
+
+            def _commit(msg: Dict[str, Any]) -> None:
+                self._commit_message(sid, msg)
+
             if hasattr(self._loop, "run_with_messages"):
-                answer, session_append = self._loop.run_with_messages(
+                answer, _ = self._loop.run_with_messages(
                     user_query=user_query,
                     agent_config=agent_config,
                     model=model,
-                    project_prompt=effective_prompt,
                     request_id=request_id,
                     extra_messages=history,
                     on_text=on_text,
@@ -218,14 +216,15 @@ class QueryEngine:
                     on_tool_end=on_tool_end,
                     on_compaction=on_compaction,
                     abort_event=abort_event,
+                    on_message_commit=_commit,
                 )
             else:
-                # 兼容旧版 AgentLoop（仅返回 final_text）
+                # 兼容不支持 write-ahead 的老 Loop（仅返回 final_text）：
+                # 整轮完成后一次性补写 user + assistant，失去"崩了不丢"能力。
                 answer = self._loop.run(
                     user_query=user_query,
                     agent_config=agent_config,
                     model=model,
-                    project_prompt=effective_prompt,
                     request_id=request_id,
                     extra_messages=history,
                     on_text=on_text,
@@ -233,10 +232,9 @@ class QueryEngine:
                     on_tool_end=on_tool_end,
                     on_compaction=on_compaction,
                 )
-                session_append = [
-                    {"role": "user", "content": user_query},
-                    {"role": "assistant", "content": answer or "（无回复）"},
-                ]
+                _commit({"role": "user", "content": user_query})
+                _commit({"role": "assistant", "content": answer or "（无回复）"})
+
             final_answer = self._apply_verify_gate(
                 user_query=user_query,
                 assistant_reply=answer,
@@ -245,69 +243,17 @@ class QueryEngine:
                 request_id=request_id,
                 history=history,
             )
-            normalized_append = self._ensure_final_assistant_message(
-                messages=session_append,
-                user_query=user_query,
-                assistant_reply=final_answer,
-            )
-            self._append_messages_locked(
-                sid=sid,
-                new_messages=normalized_append,
-            )
-            if self._store is not None:
-                self._store.save_session(sid, self._sessions.get(sid, []))
+            if final_answer != answer:
+                # Verify Gate 罕见路径：最终文本被改写，覆写末尾 assistant。
+                self._rewrite_last_assistant(sid, final_answer)
+
+            # 记录最近活跃会话（供 CLI --resume-last / /resume-last）。
+            # 所有入口（CLI/Web/Python API）共享一份 last_session.txt。
+            record_last_session(sid)
+
             self._submit_count += 1
             self._run_housekeeping(force=False)
             return final_answer
-
-    # ------------------------------------------------------------------ #
-    #                   项目提示词（Layer 3）API                            #
-    # ------------------------------------------------------------------ #
-    def get_project_prompt(self, session_id: str) -> Optional[str]:
-        """读取会话当前的项目提示词；未持久化或已清空返回 None。"""
-        sid = self._normalize_session_id(session_id)
-        if self._store is None:
-            return None
-        try:
-            return self._store.load_project_prompt(sid)
-        except Exception:
-            return None
-
-    def set_project_prompt(self, session_id: str, project_prompt: Optional[str]) -> None:
-        """
-        显式设置会话的项目提示词（供 Web UI 侧栏 / REST 端点调用）。
-        空串或 None 视为清除。
-        """
-        sid = self._normalize_session_id(session_id)
-        self.create_session(sid)
-        if self._store is None:
-            return
-        self._store.save_project_prompt(sid, project_prompt)
-
-    def _resolve_project_prompt(
-        self, sid: str, incoming: Optional[str]
-    ) -> Optional[str]:
-        """
-        根据入参决定本轮实际使用的项目提示词，并同步到 store：
-          - incoming is None  → 不覆盖；取 store 中已存值兜底
-          - incoming == ""    → 显式清除并持久化
-          - incoming 非空      → 使用并持久化
-        """
-        if incoming is None:
-            if self._store is None:
-                return None
-            try:
-                return self._store.load_project_prompt(sid)
-            except Exception:
-                return None
-
-        text = incoming.strip()
-        if self._store is not None:
-            try:
-                self._store.save_project_prompt(sid, text if text else None)
-            except Exception:
-                pass
-        return text or None
 
     # ------------------------------------------------------------------ #
     #                       内部方法                                       #
@@ -345,6 +291,63 @@ class QueryEngine:
         history.extend(new_messages)
         if len(history) > self._max_history_messages:
             self._sessions[sid] = history[-self._max_history_messages :]
+
+    def _commit_message(self, sid: str, msg: Dict[str, Any]) -> None:
+        """
+        write-ahead：单条消息即时落盘 + 内存 append + 超限 FIFO 回写。
+
+        调用路径：AgentLoop 内部每产出一条 user/assistant/tool 立刻触发。
+        任一环节失败都不会中断 LLM 主流程（异常会被 AgentLoop 吞掉）。
+        """
+        if not isinstance(msg, dict):
+            return
+        with self._global_lock:
+            history = self._sessions.setdefault(sid, [])
+            history.append(msg)
+            fifo_truncated = False
+            if len(history) > self._max_history_messages:
+                self._sessions[sid] = history[-self._max_history_messages :]
+                fifo_truncated = True
+        # 不管有没有 SessionStore，transcripts 永远全量落盘（审计 / 复盘用）。
+        try:
+            append_transcript(sid, msg)
+        except Exception:
+            pass
+        if self._store is None:
+            return
+        try:
+            if fifo_truncated:
+                # 超上限：一次性重写，保证磁盘也受控（对齐内存视图）
+                self._store.replace_session(sid, self._sessions[sid])
+            else:
+                self._store.append_message(sid, msg)
+        except Exception:
+            pass
+
+    def _rewrite_last_assistant(self, sid: str, new_text: str) -> None:
+        """
+        Verify Gate 触发时用新文本覆盖末尾的 plain assistant（无 tool_calls 的那条）。
+        找不到就 append。整条会话 replace_session 一次性落盘。
+        """
+        final_text = (new_text or "").strip() or "（无回复）"
+        with self._global_lock:
+            history = self._sessions.setdefault(sid, [])
+            idx = None
+            for i in range(len(history) - 1, -1, -1):
+                m = history[i]
+                if m.get("role") == "assistant" and not m.get("tool_calls"):
+                    idx = i
+                    break
+            if idx is None:
+                history.append({"role": "assistant", "content": final_text})
+            else:
+                history[idx] = {"role": "assistant", "content": final_text}
+        if self._store is None:
+            return
+        try:
+            self._store.replace_session(sid, self._sessions[sid])
+        except Exception:
+            pass
 
     @staticmethod
     def _ensure_final_assistant_message(

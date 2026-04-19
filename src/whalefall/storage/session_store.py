@@ -2,10 +2,17 @@
 """
 SessionStore：会话历史持久化（SQLite）。
 
-- 跨进程会话续跑能力
-- Schema：session_id + messages_json + project_prompt + updated_at
-  （project_prompt 用于持久化 Layer 3 项目提示词，Web UI 刷新/CLI 重连后能复用）
-- 容量治理：TTL / 最大会话数 / 每会话消息上限 / DB 体积上限
+设计要点
+--------
+- **每条消息一行**：`session_messages` 表一行一条消息，`append_message(s)` 立即
+  写入（write-ahead），进程在任何时刻被杀都不会丢已提交的消息。
+- **孤儿 tool_calls 容错**：加载时调用 `filter_unresolved_tool_uses`，把
+  `assistant(tool_calls)` 但缺少对应 `tool_result` 的整条 assistant 丢弃——这和
+  Claude Code 对本地 JSONL 会话恢复的策略一致，避免把不完整轮次喂给 LLM 导致
+  schema 错误。
+- **老库自动迁移**：旧 schema `sessions.messages_json` 的大 JSON Blob 启动时
+  会被转成 `session_messages` 一行一条，并 DROP 掉旧列（SQLite 3.35+）。
+- **容量治理**：TTL / 最大会话数 / 每会话消息上限 / DB 体积上限。
 """
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from whalefall.core.log import get_logger
 from whalefall.core.runtime import sessions_db_path
@@ -26,13 +33,110 @@ DEFAULT_MAX_MESSAGES_PER_SESSION = 400
 DEFAULT_TTL_DAYS = 30
 DEFAULT_MAX_DB_BYTES = 200 * 1024 * 1024  # 200MB
 
+# session_messages 永不保留 system —— system 每次 submit 由 render_system_prompt
+# 重新生成（对齐 Claude Code：history 只存 user/assistant/tool）
+_VALID_ROLES = {"user", "assistant", "tool"}
+
 
 def _now_ts() -> int:
     return int(time.time())
 
 
+# ---------------------------------------------------------------------------
+#                     消息编解码 / 孤儿 tool 调用过滤
+# ---------------------------------------------------------------------------
+def _normalize_message(item: Any) -> Optional[Dict[str, Any]]:
+    """把任意入参规整成 {role, content, ...} 标准字典；非法消息返回 None。"""
+    if not isinstance(item, dict):
+        return None
+    role = str(item.get("role", "")).strip().lower()
+    if role not in _VALID_ROLES:
+        return None
+    msg: Dict[str, Any] = {"role": role, "content": str(item.get("content", ""))}
+
+    if role == "assistant" and isinstance(item.get("tool_calls"), list):
+        tc_out: List[Dict[str, Any]] = []
+        for tc in item["tool_calls"]:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            tc_out.append({
+                "id": str(tc.get("id", "")),
+                "type": str(tc.get("type", "function") or "function"),
+                "function": {
+                    "name": str(fn.get("name", "")),
+                    "arguments": (
+                        fn.get("arguments")
+                        if isinstance(fn.get("arguments"), str)
+                        else json.dumps(fn.get("arguments", {}), ensure_ascii=False)
+                    ),
+                },
+            })
+        if tc_out:
+            msg["tool_calls"] = tc_out
+
+    if role == "tool":
+        if "tool_call_id" in item:
+            msg["tool_call_id"] = str(item["tool_call_id"])
+        if "_tool_name" in item:
+            msg["_tool_name"] = str(item.get("_tool_name", ""))
+        ts = item.get("_ts")
+        if isinstance(ts, (int, float)):
+            msg["_ts"] = float(ts)
+    return msg
+
+
+def filter_unresolved_tool_uses(
+    messages: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    孤儿 tool_use 清理（对齐 Claude Code `filterUnresolvedToolUses`）：
+      - 收集所有 assistant.tool_calls[*].id 集合与 tool.tool_call_id 集合
+      - 若 assistant 的所有 tool_calls 都没匹配到 tool_result → 整条 assistant 丢弃
+      - 孤儿 tool（无对应 tool_call_id）也一并丢弃，避免 LLM 抛"无 tool_use 配对"错
+
+    这样在崩溃恢复时能自动跳过没写完的一轮，让下一次 submit 从干净状态起步。
+    """
+    tool_use_ids: set[str] = set()
+    tool_result_ids: set[str] = set()
+    for m in messages:
+        if m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
+            for tc in m["tool_calls"]:
+                tcid = str(tc.get("id") or "") if isinstance(tc, dict) else ""
+                if tcid:
+                    tool_use_ids.add(tcid)
+        elif m.get("role") == "tool":
+            tcid = str(m.get("tool_call_id") or "")
+            if tcid:
+                tool_result_ids.add(tcid)
+
+    unresolved = tool_use_ids - tool_result_ids
+    orphan_results = tool_result_ids - tool_use_ids
+
+    if not unresolved and not orphan_results:
+        return list(messages)
+
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
+            ids = [str(tc.get("id") or "") for tc in m["tool_calls"] if isinstance(tc, dict)]
+            ids = [i for i in ids if i]
+            if ids and all(i in unresolved for i in ids):
+                # 所有 tool_call 都孤儿 → 整条 assistant 丢弃
+                continue
+        if m.get("role") == "tool":
+            tcid = str(m.get("tool_call_id") or "")
+            if tcid and tcid in orphan_results:
+                continue
+        out.append(m)
+    return out
+
+
+# ---------------------------------------------------------------------------
+#                              SessionStore
+# ---------------------------------------------------------------------------
 class SessionStore:
-    """SQLite 会话存储（线程安全）。"""
+    """SQLite 会话存储（线程安全，消息即时写盘）。"""
 
     def __init__(self, db_path: Optional[str | Path] = None):
         self.path = (
@@ -40,13 +144,12 @@ class SessionStore:
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        # Per-session 细粒度锁：避免同一会话在并发 WebSocket / CLI 里互相覆盖。
         self._session_locks: Dict[str, threading.Lock] = {}
         self._session_locks_guard = threading.Lock()
         self._ensure_schema()
 
     def _session_lock(self, sid: str) -> threading.Lock:
-        """拿到某个 session 的内存级锁。同一 sid 的 save/clear/drop 串行化。"""
+        """某个 session 的内存级锁。同一 sid 的所有写操作串行化。"""
         with self._session_locks_guard:
             lk = self._session_locks.get(sid)
             if lk is None:
@@ -59,169 +162,147 @@ class SessionStore:
     # ------------------------------------------------------------------ #
 
     def load_session(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        加载某会话的全部消息（按原始插入顺序）。
+
+        加载时会自动丢弃孤儿 tool_calls（见 `filter_unresolved_tool_uses`），
+        调用方拿到的是可以直接喂给 LLM 的干净历史。
+        """
         sid = (session_id or "").strip()
         if not sid:
             return []
         with self._lock:
             conn = self._connect()
             try:
-                row = conn.execute(
-                    "SELECT messages_json FROM sessions WHERE session_id = ?", (sid,)
-                ).fetchone()
-                return self._decode_messages(row[0]) if row else []
-            finally:
-                conn.close()
-
-    def save_session(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        sid = (session_id or "").strip()
-        if not sid:
-            return
-        payload = self._encode_messages(messages)
-        now = _now_ts()
-        with self._session_lock(sid):
-            conn = self._connect()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                # 保留 project_prompt：仅更新 messages_json 和 updated_at
-                conn.execute(
+                rows = conn.execute(
                     """
-                    INSERT INTO sessions(session_id, messages_json, updated_at)
-                    VALUES(?, ?, ?)
-                    ON CONFLICT(session_id)
-                    DO UPDATE SET messages_json=excluded.messages_json, updated_at=excluded.updated_at
+                    SELECT role, content, tool_calls_json, tool_call_id, tool_name, ts
+                    FROM session_messages
+                    WHERE session_id = ?
+                    ORDER BY ordinal ASC
                     """,
-                    (sid, payload, now),
-                )
-                conn.commit()
-            except Exception as exc:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                _logger.warning("session save failed | sid=%s err=%s", sid, exc)
-                raise
+                    (sid,),
+                ).fetchall()
             finally:
                 conn.close()
+        raw: List[Dict[str, Any]] = []
+        for role, content, tc_json, tc_id, tool_name, ts in rows:
+            item: Dict[str, Any] = {"role": role, "content": content or ""}
+            if role == "assistant" and tc_json:
+                try:
+                    tc_list = json.loads(tc_json)
+                except Exception:
+                    tc_list = None
+                if isinstance(tc_list, list):
+                    item["tool_calls"] = tc_list
+            if role == "tool":
+                if tc_id:
+                    item["tool_call_id"] = tc_id
+                if tool_name:
+                    item["_tool_name"] = tool_name
+                if isinstance(ts, (int, float)):
+                    item["_ts"] = float(ts)
+            raw.append(item)
+        return filter_unresolved_tool_uses(raw)
+
+    def append_message(
+        self, session_id: str, message: Dict[str, Any]
+    ) -> Optional[int]:
+        """写入一条消息并立即落盘；返回新插入行的 ordinal（失败/空返回 None）。"""
+        sid = (session_id or "").strip()
+        normalized = _normalize_message(message) if sid else None
+        if not sid or normalized is None:
+            return None
+        return self._append_batch(sid, [normalized])[0] if sid else None
 
     def append_messages(
-        self,
-        session_id: str,
-        new_messages: List[Dict[str, Any]],
+        self, session_id: str, new_messages: Iterable[Dict[str, Any]]
     ) -> int:
         """
-        原子追加若干消息到指定 session，返回追加后的总长度。
+        原子追加一批消息，返回总消息数（含此前已有的）。空列表返回当前总数。
 
-        读-改-写全程持有 per-session 锁 + BEGIN IMMEDIATE 事务，防止
-        并发调用互相覆盖（此前 save_session 整表覆盖会丢消息）。
+        每条消息一行，作为单次事务一次性提交；避免"写到一半崩"留下不一致。
         """
         sid = (session_id or "").strip()
-        if not sid or not new_messages:
+        if not sid:
             return 0
+        normalized = [m for m in (_normalize_message(x) for x in new_messages) if m]
+        if not normalized:
+            return self.count_messages(sid)
+        ordinals = self._append_batch(sid, normalized)
+        return ordinals[-1] + 1 if ordinals else self.count_messages(sid)
+
+    def replace_session(
+        self, session_id: str, messages: Iterable[Dict[str, Any]]
+    ) -> int:
+        """
+        原子替换某会话的全部消息（压缩回写 / 测试用）。先清空，再批量 append。
+        返回写入后的消息条数。
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return 0
+        normalized = [m for m in (_normalize_message(x) for x in messages) if m]
         now = _now_ts()
         with self._session_lock(sid):
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT messages_json FROM sessions WHERE session_id = ?", (sid,)
-                ).fetchone()
-                existing = self._decode_messages(row[0]) if row else []
-                merged = existing + list(new_messages)
-                payload = self._encode_messages(merged)
+                conn.execute("DELETE FROM session_messages WHERE session_id = ?", (sid,))
                 conn.execute(
                     """
-                    INSERT INTO sessions(session_id, messages_json, updated_at)
+                    INSERT INTO sessions(session_id, updated_at, created_at)
                     VALUES(?, ?, ?)
                     ON CONFLICT(session_id)
-                    DO UPDATE SET messages_json=excluded.messages_json, updated_at=excluded.updated_at
+                    DO UPDATE SET updated_at=excluded.updated_at
                     """,
-                    (sid, payload, now),
+                    (sid, now, now),
                 )
+                for idx, msg in enumerate(normalized):
+                    self._insert_message_row(conn, sid, idx, msg, now)
                 conn.commit()
-                return len(merged)
+                return len(normalized)
             except Exception as exc:
                 try:
                     conn.rollback()
                 except Exception:
                     pass
-                _logger.warning("session append failed | sid=%s err=%s", sid, exc)
+                _logger.warning("session replace failed | sid=%s err=%s", sid, exc)
                 raise
             finally:
                 conn.close()
 
-    def clear_session(self, session_id: str) -> None:
-        self.save_session(session_id, [])
+    # 兼容旧调用路径（会话最终落盘用：先整表替换）。
+    # 新代码应优先使用 append_message / append_messages 以获得即时落盘语义。
+    save_session = replace_session
 
-    # ------------------------------------------------------------------ #
-    #                   项目提示词（Layer 3）持久化                         #
-    # ------------------------------------------------------------------ #
-    def load_project_prompt(self, session_id: str) -> Optional[str]:
-        """取该会话上次保存的项目提示词；无记录或空串返回 None。"""
+    def clear_session(self, session_id: str) -> None:
+        self.replace_session(session_id, [])
+
+    def count_messages(self, session_id: str) -> int:
         sid = (session_id or "").strip()
         if not sid:
-            return None
+            return 0
         with self._lock:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT project_prompt FROM sessions WHERE session_id = ?", (sid,)
+                    "SELECT COUNT(*) FROM session_messages WHERE session_id = ?",
+                    (sid,),
                 ).fetchone()
             finally:
                 conn.close()
-        if not row:
-            return None
-        value = row[0]
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    def save_project_prompt(self, session_id: str, project_prompt: Optional[str]) -> None:
-        """
-        保存会话的项目提示词。
-          - 非空串 → 写入；
-          - None / 空白 → 清空该列（NULL），等同"取消本 session 的项目提示词"。
-        本方法不触碰 messages_json；若 session 不存在则自动 upsert 空消息行。
-        """
-        sid = (session_id or "").strip()
-        if not sid:
-            return
-        normalized: Optional[str] = None
-        if project_prompt is not None:
-            stripped = str(project_prompt).strip()
-            normalized = stripped or None
-        now = _now_ts()
-        with self._session_lock(sid):
-            conn = self._connect()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                conn.execute(
-                    """
-                    INSERT INTO sessions(session_id, messages_json, project_prompt, updated_at)
-                    VALUES(?, '[]', ?, ?)
-                    ON CONFLICT(session_id)
-                    DO UPDATE SET project_prompt=excluded.project_prompt, updated_at=excluded.updated_at
-                    """,
-                    (sid, normalized, now),
-                )
-                conn.commit()
-            except Exception as exc:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                _logger.warning("session save_project_prompt failed | sid=%s err=%s", sid, exc)
-                raise
-            finally:
-                conn.close()
+        return int(row[0]) if row else 0
 
     def delete_older_than(self, days: int) -> int:
-        """删除 N 天前更新的所有会话，返回删除数量。"""
+        """删除 N 天前更新的所有会话，返回删除的会话数。"""
         cutoff = _now_ts() - max(1, int(days)) * 86400
         with self._lock:
             conn = self._connect()
             try:
-                cur = conn.execute("DELETE FROM sessions WHERE updated_at < ?", (cutoff,))
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+                )
                 conn.commit()
                 return int(cur.rowcount or 0)
             finally:
@@ -240,27 +321,40 @@ class SessionStore:
                 conn.close()
 
     def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """返回最近 N 个会话的元数据（id, message_count, updated_at）。"""
+        """
+        按最后活跃时间降序返回最近 N 个会话，附带轮数与 user 首句预览。
+        用于 Web 侧栏与 CLI /resume 列表。
+        """
+        lim = max(1, int(limit))
         with self._lock:
             conn = self._connect()
             try:
                 rows = conn.execute(
-                    "SELECT session_id, messages_json, updated_at "
-                    "FROM sessions ORDER BY updated_at DESC LIMIT ?",
-                    (max(1, int(limit)),),
+                    """
+                    SELECT s.session_id, s.updated_at,
+                           (SELECT COUNT(*) FROM session_messages m
+                              WHERE m.session_id = s.session_id AND m.role = 'user') AS turns,
+                           (SELECT content FROM session_messages m
+                              WHERE m.session_id = s.session_id AND m.role = 'user'
+                              ORDER BY ordinal ASC LIMIT 1) AS first_user
+                    FROM sessions s
+                    ORDER BY s.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (lim,),
                 ).fetchall()
-                result = []
-                for sid, raw, ts in rows:
-                    msgs = self._decode_messages(raw)
-                    turns = sum(1 for m in msgs if m.get("role") == "user")
-                    first_user = next(
-                        (m.get("content", "") for m in msgs if m.get("role") == "user"), ""
-                    )
-                    preview = (first_user or "")[:50].strip().replace("\n", " ")
-                    result.append({"session_id": sid, "turns": turns, "updated_at": ts, "preview": preview})
-                return result
             finally:
                 conn.close()
+        result: List[Dict[str, Any]] = []
+        for sid, ts, turns, first_user in rows:
+            preview = ((first_user or "")[:50]).strip().replace("\n", " ")
+            result.append({
+                "session_id": sid,
+                "turns": int(turns or 0),
+                "updated_at": int(ts or 0),
+                "preview": preview,
+            })
+        return result
 
     def enforce_limits(
         self,
@@ -270,7 +364,7 @@ class SessionStore:
         ttl_days: int = DEFAULT_TTL_DAYS,
         max_db_bytes: int = DEFAULT_MAX_DB_BYTES,
     ) -> Dict[str, int]:
-        """执行容量治理，返回统计。"""
+        """TTL 清理 / 每会话裁剪 / 会话总数上限 / DB 体积上限。"""
         stats = {
             "deleted_ttl": 0,
             "trimmed_sessions": 0,
@@ -286,22 +380,34 @@ class SessionStore:
         with self._lock:
             conn = self._connect()
             try:
-                # TTL 清理
-                cur = conn.execute("DELETE FROM sessions WHERE updated_at < ?", (ttl_cutoff,))
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE updated_at < ?", (ttl_cutoff,)
+                )
                 stats["deleted_ttl"] = int(cur.rowcount or 0)
 
-                # 每会话消息数裁剪
-                for sid, raw in conn.execute(
-                    "SELECT session_id, messages_json FROM sessions"
-                ).fetchall():
-                    msgs = self._decode_messages(raw)
-                    if len(msgs) > max_messages_per_session:
-                        trimmed = msgs[-max_messages_per_session:]
-                        conn.execute(
-                            "UPDATE sessions SET messages_json=?, updated_at=? WHERE session_id=?",
-                            (self._encode_messages(trimmed), now, sid),
-                        )
-                        stats["trimmed_sessions"] += 1
+                # 每会话消息数裁剪：按 ordinal 留最后 N 条，删除其余
+                overflow = conn.execute(
+                    """
+                    SELECT session_id, COUNT(*) FROM session_messages
+                    GROUP BY session_id HAVING COUNT(*) > ?
+                    """,
+                    (max_messages_per_session,),
+                ).fetchall()
+                for sid, _cnt in overflow:
+                    conn.execute(
+                        """
+                        DELETE FROM session_messages
+                         WHERE session_id = ?
+                           AND ordinal NOT IN (
+                               SELECT ordinal FROM session_messages
+                                WHERE session_id = ?
+                                ORDER BY ordinal DESC
+                                LIMIT ?
+                           )
+                        """,
+                        (sid, sid, max_messages_per_session),
+                    )
+                    stats["trimmed_sessions"] += 1
 
                 # 会话数量上限
                 keep_ids = [
@@ -351,90 +457,179 @@ class SessionStore:
         conn = sqlite3.connect(self.path, timeout=5)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    def _append_batch(
+        self, sid: str, messages: List[Dict[str, Any]]
+    ) -> List[int]:
+        """内部：对单 session 批量写消息；返回各条写入后的 ordinal。"""
+        if not messages:
+            return []
+        now = _now_ts()
+        with self._session_lock(sid):
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(ordinal), -1) FROM session_messages WHERE session_id = ?",
+                    (sid,),
+                ).fetchone()
+                next_ord = int(row[0]) + 1
+                conn.execute(
+                    """
+                    INSERT INTO sessions(session_id, updated_at, created_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(session_id)
+                    DO UPDATE SET updated_at=excluded.updated_at
+                    """,
+                    (sid, now, now),
+                )
+                ords: List[int] = []
+                for offset, msg in enumerate(messages):
+                    ordinal = next_ord + offset
+                    self._insert_message_row(conn, sid, ordinal, msg, now)
+                    ords.append(ordinal)
+                conn.commit()
+                return ords
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                _logger.warning("session append failed | sid=%s err=%s", sid, exc)
+                raise
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _insert_message_row(
+        conn: sqlite3.Connection,
+        sid: str,
+        ordinal: int,
+        msg: Dict[str, Any],
+        now_ts: int,
+    ) -> None:
+        tc_json = (
+            json.dumps(msg["tool_calls"], ensure_ascii=False, separators=(",", ":"))
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+            else None
+        )
+        tc_id = msg.get("tool_call_id") if msg.get("role") == "tool" else None
+        tool_name = msg.get("_tool_name") if msg.get("role") == "tool" else None
+        ts = (
+            float(msg.get("_ts", now_ts))
+            if msg.get("role") == "tool"
+            else float(now_ts)
+        )
+        conn.execute(
+            """
+            INSERT INTO session_messages(
+                session_id, ordinal, role, content,
+                tool_calls_json, tool_call_id, tool_name, ts
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sid,
+                ordinal,
+                str(msg.get("role") or ""),
+                str(msg.get("content") or ""),
+                tc_json,
+                tc_id,
+                tool_name,
+                ts,
+            ),
+        )
+
     def _ensure_schema(self) -> None:
+        """建表 + 老库迁移（`sessions.messages_json` → `session_messages`）。"""
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS sessions (
-                        session_id     TEXT PRIMARY KEY,
-                        messages_json  TEXT NOT NULL,
-                        project_prompt TEXT,
-                        updated_at     INTEGER NOT NULL
+                        session_id  TEXT PRIMARY KEY,
+                        updated_at  INTEGER NOT NULL,
+                        created_at  INTEGER NOT NULL DEFAULT 0
                     )
                     """
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)"
+                    """
+                    CREATE TABLE IF NOT EXISTS session_messages (
+                        session_id       TEXT NOT NULL,
+                        ordinal          INTEGER NOT NULL,
+                        role             TEXT NOT NULL,
+                        content          TEXT NOT NULL,
+                        tool_calls_json  TEXT,
+                        tool_call_id     TEXT,
+                        tool_name        TEXT,
+                        ts               REAL NOT NULL,
+                        PRIMARY KEY(session_id, ordinal),
+                        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                            ON DELETE CASCADE
+                    )
+                    """
                 )
-                # 老库迁移：已有表但无 project_prompt 列时补上
-                existing_cols = {
-                    row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
-                }
-                if "project_prompt" not in existing_cols:
-                    conn.execute("ALTER TABLE sessions ADD COLUMN project_prompt TEXT")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at "
+                    "ON sessions(updated_at)"
+                )
                 conn.commit()
+
+                self._migrate_legacy_messages_json(conn)
             finally:
                 conn.close()
 
-    @staticmethod
-    def _decode_messages(raw: Any) -> List[Dict[str, Any]]:
+    def _migrate_legacy_messages_json(self, conn: sqlite3.Connection) -> None:
+        """
+        老库（messages_json blob）→ 新 schema（session_messages 每行一条）。
+        只在第一次升级时跑一次，完成后 DROP COLUMN messages_json（SQLite 3.35+）。
+        """
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "messages_json" not in existing_cols:
+            return  # 已经是新 schema
+
+        legacy_rows = conn.execute(
+            "SELECT session_id, messages_json, updated_at FROM sessions"
+        ).fetchall()
+        if legacy_rows:
+            _logger.info(
+                "migrating legacy sessions.messages_json → session_messages "
+                "(rows=%d)", len(legacy_rows)
+            )
         try:
-            arr = json.loads(raw or "[]")
-        except Exception:
-            return []
-        if not isinstance(arr, list):
-            return []
-
-        out: List[Dict[str, Any]] = []
-        for item in arr:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role", "")).strip().lower()
-            if role not in {"system", "user", "assistant", "tool"}:
-                continue
-            msg: Dict[str, Any] = {"role": role}
-            msg["content"] = str(item.get("content", ""))
-
-            if role == "assistant" and isinstance(item.get("tool_calls"), list):
-                tc_out = []
-                for tc in item["tool_calls"]:
-                    if not isinstance(tc, dict):
+            conn.execute("BEGIN IMMEDIATE")
+            for sid, raw, ts in legacy_rows:
+                try:
+                    arr = json.loads(raw or "[]")
+                except Exception:
+                    arr = []
+                if not isinstance(arr, list):
+                    arr = []
+                # 清空该 sid 在新表里的内容避免重复
+                conn.execute(
+                    "DELETE FROM session_messages WHERE session_id = ?", (sid,)
+                )
+                for idx, item in enumerate(arr):
+                    norm = _normalize_message(item)
+                    if norm is None:
                         continue
-                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-                    tc_out.append({
-                        "id": str(tc.get("id", "")),
-                        "type": str(tc.get("type", "function") or "function"),
-                        "function": {
-                            "name": str(fn.get("name", "")),
-                            "arguments": (
-                                fn.get("arguments")
-                                if isinstance(fn.get("arguments"), str)
-                                else json.dumps(fn.get("arguments", {}), ensure_ascii=False)
-                            ),
-                        },
-                    })
-                if tc_out:
-                    msg["tool_calls"] = tc_out
-
-            if role == "tool" and "tool_call_id" in item:
-                msg["tool_call_id"] = str(item["tool_call_id"])
-            if role == "tool":
-                if "_tool_name" in item:
-                    msg["_tool_name"] = str(item.get("_tool_name", ""))
-                ts = item.get("_ts")
-                if isinstance(ts, (int, float)):
-                    msg["_ts"] = float(ts)
-
-            out.append(msg)
-        return out
-
-    @classmethod
-    def _encode_messages(cls, messages: List[Dict[str, Any]]) -> str:
-        normalized = cls._decode_messages(
-            json.dumps(messages, ensure_ascii=False, default=str)
-        )
-        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+                    self._insert_message_row(conn, sid, idx, norm, int(ts or _now_ts()))
+            try:
+                conn.execute("ALTER TABLE sessions DROP COLUMN messages_json")
+            except sqlite3.OperationalError:
+                _logger.info(
+                    "DROP COLUMN messages_json not supported on this SQLite; "
+                    "column kept but no longer used"
+                )
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _logger.warning("legacy messages_json migration failed | err=%s", exc)

@@ -12,20 +12,22 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-PROJECT_MD_TEMPLATE = (
-    "# 项目提示词 (PROJECT.md)\n\n"
-    "本文件作为 whalefall 的**项目提示词**（Layer 3）模板使用。\n"
-    "与 Claude Code 的 `CLAUDE.md`、Codex 的 `AGENTS.md` 定位一致，\n"
-    "用于给 agent 提供项目级约定、领域知识、禁忌等。\n\n"
-    "## 说明：不会自动读取\n"
-    "本文件**不会被框架自动加载**，必须显式注入：\n"
-    "- CLI：`whalefall --project-prompt-file ./PROJECT.md ...`\n"
-    "         或启动后运行 `/project load ./PROJECT.md`\n"
-    "- Web：侧栏「项目提示词」面板 → 📁 导入按钮 → 选择本文件\n"
-    "- Python API：先 `load_project_prompt_from_file('./PROJECT.md')`\n"
-    "              再把返回的 str 传给 `AgentLoop.run*(project_prompt=...)`\n"
-    "或 `QueryEngine.submit(project_prompt=...)`\n\n"
-    "支持 `@include relative/path.md` 递归展开（最多 3 层）。\n\n"
+AGENTS_MD_TEMPLATE = (
+    "# AGENTS.md — 项目约定参考\n\n"
+    "本文件是一份**给你自己看**的项目笔记：列出当前项目的领域知识、禁忌、\n"
+    "交付规范等。whalefall **不会自动读取本文件**。\n\n"
+    "## 如何把这里的内容接入到 agent\n\n"
+    "whalefall 的系统提示词由 `agent/roles/definitions/<name>/AGENT.md` 的\n"
+    "正文驱动。若想让某类任务长期带上项目约定，有两种推荐做法：\n\n"
+    "1. **改 agent 定义**：把关键内容整合进\n"
+    "   `whalefall/agent/roles/definitions/general/AGENT.md` 的正文，或在\n"
+    "   `definitions/` 下新建一个 `my_project/AGENT.md` 作为自定义 agent，\n"
+    "   通过 `--agent my_project` 调用。\n\n"
+    "2. **按需整段替换身份**：调用 `AgentLoop.run_*(system_prompt=...)` 或\n"
+    "   `QueryEngine.submit` 前用自己的 markdown 作为 `custom_base`，它会\n"
+    "   整体替换默认的 `BASE_IDENTITY`。适合工作流节点型场景（每节点一份\n"
+    "   专属 system）。\n\n"
+    "---\n\n"
     "## 项目背景\n\n"
     "（简述项目用途、主要场景）\n\n"
     "## 编码 / 交付规范\n\n"
@@ -40,7 +42,9 @@ COMMON_HELP_LINES: Tuple[str, ...] = (
     "/clear             清空当前会话上下文",
     "/compact           手动执行一次 microcompact",
     "/resume [id]       列出最近会话或恢复指定会话",
-    "/init              在当前工作目录创建 PROJECT.md 模板（不会自动读取，需用 /project load 或 --project-prompt-file 显式注入）",
+    "/resume-last       跳回最近一次活跃会话（等同 CLI 启动带 --resume-last）",
+    "/sessions          列出最近会话（/resume 无参时的别名）",
+    "/init              在当前工作目录创建 AGENTS.md 项目约定笔记（不会自动读取）",
     "/stats             显示当前会话统计",
     "/help              显示此帮助",
 )
@@ -141,6 +145,36 @@ def cmd_compact(ctx: SlashContext) -> SlashResult:
     )
 
 
+def cmd_resume_last(ctx: SlashContext) -> SlashResult:
+    """跳回最近一次活跃会话（从 last_session.txt 读取 sid）。"""
+    if ctx.query_engine is None:
+        return SlashResult(handled=True, message="无 QueryEngine，无法恢复会话。")
+    if ctx.strict_cold_start:
+        return SlashResult(
+            handled=True,
+            message="冷启动模式下 /resume-last 不可用。",
+        )
+    from whalefall.storage.last_session import read_last_session
+    last = read_last_session()
+    if not last:
+        return SlashResult(handled=True, message="没有记录到最近会话。")
+    if last == ctx.session_id:
+        return SlashResult(
+            handled=True,
+            message=f"当前已在最近会话 '{last}'，无需切换。",
+        )
+    n = ctx.query_engine.load_session_into(last, ctx.session_id)
+    if n <= 0:
+        return SlashResult(
+            handled=True,
+            message=f"最近会话 '{last}' 在存储里为空或已被清理。",
+        )
+    return SlashResult(
+        handled=True,
+        message=f"已接上最近会话 '{last}'，载入 {n} 条消息。",
+    )
+
+
 def cmd_resume(ctx: SlashContext, arg: str) -> SlashResult:
     if ctx.query_engine is None:
         return SlashResult(handled=True, message="无 QueryEngine，无法恢复会话。")
@@ -168,34 +202,36 @@ def cmd_resume(ctx: SlashContext, arg: str) -> SlashResult:
 
 def cmd_init(ctx: SlashContext) -> SlashResult:
     """
-    在当前工作目录生成 PROJECT.md 模板。
-    本文件不会被框架自动加载；用户需显式通过 /project load、--project-prompt-file
-    或 API 参数注入为 Layer 3 项目提示词。
+    在当前工作目录生成 AGENTS.md 项目约定笔记。
+    本文件不会被框架自动加载；用作给人看的项目背景文档，具体如何把内容接入
+    agent 见文件内说明。
     """
     target_dir = ctx.cwd or os.getcwd()
-    target = os.path.join(target_dir, "PROJECT.md")
+    target = os.path.join(target_dir, "AGENTS.md")
     if os.path.exists(target):
-        hint = (
-            f"PROJECT.md 已存在: {target}\n"
-            "提示：本文件不会自动加载。用以下任一方式显式注入：\n"
-            "  - CLI：运行 /project load ./PROJECT.md\n"
-            "  - CLI 启动参数：--project-prompt-file ./PROJECT.md\n"
-            "  - Web UI：侧栏「项目提示词」面板 → 📁 导入"
+        return SlashResult(
+            handled=True,
+            message=(
+                f"AGENTS.md 已存在: {target}\n"
+                "本文件是纯手动参考的项目笔记，whalefall 不会自动加载。\n"
+                "若要把内容注入 agent，编辑 definitions/<name>/AGENT.md 或用\n"
+                "AgentLoop.run_*(system_prompt=...) 整体替换 BASE_IDENTITY。"
+            ),
         )
-        return SlashResult(handled=True, message=hint)
     try:
         with open(target, "w", encoding="utf-8") as f:
-            f.write(PROJECT_MD_TEMPLATE)
+            f.write(AGENTS_MD_TEMPLATE)
     except OSError as exc:
-        return SlashResult(handled=True, message=f"创建 PROJECT.md 失败: {exc}")
-    msg = (
-        f"已创建 PROJECT.md: {target}\n"
-        "⚠ 本文件不会被自动加载。编辑完成后用以下任一方式显式注入：\n"
-        "  - 运行 /project load ./PROJECT.md\n"
-        "  - 重启时带 --project-prompt-file ./PROJECT.md\n"
-        "  - Web UI：侧栏「项目提示词」面板 → 📁 导入"
+        return SlashResult(handled=True, message=f"创建 AGENTS.md 失败: {exc}")
+    return SlashResult(
+        handled=True,
+        message=(
+            f"已创建 AGENTS.md: {target}\n"
+            "⚠ 本文件不会被自动加载；它只是给你写下项目约定的参考笔记。\n"
+            "要让 agent 实际用上，请改 definitions/<name>/AGENT.md 或\n"
+            "在调用时传 system_prompt= 整体替换 BASE_IDENTITY。"
+        ),
     )
-    return SlashResult(handled=True, message=msg)
 
 
 def cmd_stats(ctx: SlashContext) -> SlashResult:
@@ -239,6 +275,11 @@ def dispatch_common(text: str, ctx: SlashContext) -> SlashResult:
         return cmd_compact(ctx)
     if command == "/resume":
         return cmd_resume(ctx, arg)
+    if command == "/resume-last":
+        return cmd_resume_last(ctx)
+    if command == "/sessions":
+        # /resume 无参的别名：只列表不切换
+        return cmd_resume(ctx, "")
     if command == "/init":
         return cmd_init(ctx)
     if command == "/stats":

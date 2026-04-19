@@ -73,7 +73,6 @@ whalefall v{version}
         "/exit, /quit       退出",
         "/model <name>      切换模型（如 /model gpt-4o）",
         "/agent <type>      切换 Agent 类型（general/explore/plan/verify 或自定义）",
-        "/project [show|set <text>|load <path>|clear]  管理项目提示词（Layer 3）",
     )
     HELP_TEXT = (
         "\n可用命令：\n"
@@ -94,7 +93,7 @@ whalefall v{version}
         stream: bool = True,
         bypass_permissions: bool = False,
         request_id: Optional[str] = None,
-        project_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
     ):
         """
         Args:
@@ -106,9 +105,6 @@ whalefall v{version}
             stream: 是否流式输出
             bypass_permissions: 跳过权限检查
             request_id: 可选请求 ID（用于 trace）；交互模式下会自动附加回合号
-            project_prompt: 初始项目提示词（Layer 3）；仅在首次提交时传入以初始化
-                            session；后续由 QueryEngine 从 session_store 兜底续用，
-                            通过 /project 命令可在运行时覆盖。
         """
         self._loop = agent_loop
         self._query_engine = query_engine
@@ -118,16 +114,11 @@ whalefall v{version}
         self._stream = stream
         self._bypass = bypass_permissions
         self._request_id = request_id
+        # 会话 id 解析优先级：
+        #   显式 session_id（含 --resume-last 的结果） > request_id > 新 UUID
         # 默认每次 CLI 启动都使用新 session_id，避免跨重启继承旧上下文。
-        # 若显式传入 request_id，则沿用 request_id 作为会话 id。
-        self._session_id = (request_id or f"cli-{uuid4().hex[:12]}").strip() or f"cli-{uuid4().hex[:12]}"
-
-        # 项目提示词：启动时一次性注入 session（仅当非空），之后交由 session 兜底。
-        # 这样 /project clear 后不会被启动值反复覆盖。
-        self._initial_project_prompt: Optional[str] = (
-            project_prompt if (project_prompt and project_prompt.strip()) else None
-        )
-        self._pending_project_prompt: Optional[str] = self._initial_project_prompt
+        sid_candidate = (session_id or request_id or "").strip()
+        self._session_id = sid_candidate or f"cli-{uuid4().hex[:12]}"
 
         # 对话历史统计
         self._turns: int = 0
@@ -214,17 +205,12 @@ whalefall v{version}
             if _HAS_RICH:
                 _console.print(Rule(f"[dim]Agent {self._agent_type}[/dim]"))
 
-            submit_project_prompt = self._pending_project_prompt
-            # 消费一次性覆盖：None → 由 QueryEngine 从 session_store 兜底
-            self._pending_project_prompt = None
-
             if self._query_engine is not None:
                 result = self._query_engine.submit(
                     session_id=self._session_id,
                     user_query=query,
                     agent_config=agent_config,
                     model=self._model,
-                    project_prompt=submit_project_prompt,
                     request_id=self._build_request_id(),
                     on_text=self._stream_handler.on_text_delta if self._stream else None,
                     on_tool_start=self._stream_handler.on_tool_start,
@@ -237,7 +223,6 @@ whalefall v{version}
                     user_query=query,
                     agent_config=agent_config,
                     model=self._model,
-                    project_prompt=submit_project_prompt,
                     request_id=self._build_request_id(),
                     on_text=self._stream_handler.on_text_delta if self._stream else None,
                     on_tool_start=self._stream_handler.on_tool_start,
@@ -325,10 +310,6 @@ whalefall v{version}
                 _print(f"当前: {self._agent_type}")
             return False
 
-        if command == "/project":
-            self._handle_project_command(arg)
-            return False
-
         ctx = SlashContext(
             query_engine=self._query_engine,
             session_id=self._session_id,
@@ -354,87 +335,6 @@ whalefall v{version}
         return False
 
     # /resume /init /clear /compact /stats 的业务逻辑已下沉到 ui.slash.core。
-
-    def _handle_project_command(self, arg: str) -> None:
-        """
-        /project [show|set <text>|load <path>|clear]
-          - 无参 / show           → 打印当前会话的项目提示词
-          - set <text>            → 设定文本并持久化到 session_store
-          - load <path>           → 从 md 文件加载（支持 @include 递归 3 层）
-          - clear                 → 清除本会话的项目提示词
-        变更立即持久化；下一条用户消息就会生效。
-        """
-        from whalefall.agent.roles import load_project_prompt_from_file
-
-        parts = (arg or "").split(maxsplit=1)
-        sub = parts[0].lower() if parts else "show"
-        payload = parts[1] if len(parts) > 1 else ""
-
-        if self._query_engine is None:
-            _print(
-                "错误：/project 需要 QueryEngine；当前模式未启用会话引擎",
-                style="red" if _HAS_RICH else "",
-            )
-            return
-
-        if sub in ("", "show"):
-            current = self._query_engine.get_project_prompt(self._session_id)
-            if current:
-                _print(
-                    "[项目提示词 · 当前会话]\n" + current,
-                    style="cyan" if _HAS_RICH else "",
-                )
-            else:
-                _print("当前会话未设置项目提示词。用 /project set <text> 或 /project load <path> 设置。")
-            return
-
-        if sub == "set":
-            text = payload.strip()
-            if not text:
-                _print(
-                    "用法：/project set <文本>（文本可含多行；/project clear 可清除）",
-                    style="yellow" if _HAS_RICH else "",
-                )
-                return
-            self._query_engine.set_project_prompt(self._session_id, text)
-            # 下次 submit 时 QueryEngine 会从 session_store 拿；清掉一次性槽以免覆盖
-            self._pending_project_prompt = None
-            _print(
-                f"[已设定项目提示词] {len(text)} 字符",
-                style="green" if _HAS_RICH else "",
-            )
-            return
-
-        if sub == "load":
-            path = payload.strip()
-            if not path:
-                _print("用法：/project load <md 文件路径>", style="yellow" if _HAS_RICH else "")
-                return
-            text = load_project_prompt_from_file(path)
-            if not text.strip():
-                _print(
-                    f"读取为空或文件不存在：{path}",
-                    style="red" if _HAS_RICH else "",
-                )
-                return
-            self._query_engine.set_project_prompt(self._session_id, text)
-            self._pending_project_prompt = None
-            _print(
-                f"[已从文件加载项目提示词] {path}（{len(text)} 字符）",
-                style="green" if _HAS_RICH else "",
-            )
-            return
-
-        if sub == "clear":
-            self._query_engine.set_project_prompt(self._session_id, None)
-            self._pending_project_prompt = None
-            _print("[已清除本会话项目提示词]", style="green" if _HAS_RICH else "")
-            return
-
-        _print(
-            f"未知子命令：/project {sub}。可用：show | set <text> | load <path> | clear",
-            style="red" if _HAS_RICH else "",
-        )
 
     # ------------------------------------------------------------------ #
     #                       输入/输出工具方法                               #
@@ -466,18 +366,6 @@ whalefall v{version}
             print(banner)
             print("=" * 60)
 
-        pp = self._pending_project_prompt
-        if not pp and self._query_engine is not None:
-            try:
-                pp = self._query_engine.get_project_prompt(self._session_id)
-            except Exception:
-                pp = None
-        if pp:
-            preview = pp.strip().splitlines()[0][:60]
-            _print(
-                f"[项目提示词] 已加载（{len(pp)} 字符）：{preview}…  用 /project 管理",
-                style="dim" if _HAS_RICH else "",
-            )
 
 # ------------------------------------------------------------------ #
 #                       CLI 工厂方法                                   #

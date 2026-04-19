@@ -58,3 +58,41 @@ def test_load_missing_session_returns_empty(store: SessionStore) -> None:
 def test_load_session_normalizes_id(store: SessionStore) -> None:
     assert store.load_session("") == []
     assert store.load_session("   ") == []
+
+
+def test_history_never_contains_system_role(store: SessionStore) -> None:
+    """invariant：session_messages 永远不应落盘 system role（system 每次即时渲染）。"""
+    store.append_messages(
+        "sys-reject",
+        [
+            {"role": "system", "content": "should be filtered"},
+            {"role": "user", "content": "real"},
+        ],
+    )
+    msgs = store.load_session("sys-reject")
+    assert all(m.get("role") != "system" for m in msgs), msgs
+    assert any(m.get("role") == "user" for m in msgs)
+
+
+def test_orphan_tool_calls_dropped_on_load(store: SessionStore) -> None:
+    """崩溃恢复 invariant：仅 assistant.tool_calls 没有对应 tool_result，
+    加载时整条 assistant 和孤儿 tool 都该被滤掉（对齐 Claude Code 的 filterUnresolvedToolUses）。"""
+    store.append_messages(
+        "crash-sid",
+        [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tA",
+                        "type": "function",
+                        "function": {"name": "foo", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    )
+    recovered = store.load_session("crash-sid")
+    assert [m["role"] for m in recovered] == ["user"], recovered

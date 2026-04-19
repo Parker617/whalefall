@@ -15,8 +15,6 @@ whalefall CLI 入口
 选项说明：
   --model MODEL     使用的 LLM 模型（默认: gpt-4o-mini；别名见 llm_config.ini）
   --agent TYPE      Agent 类型（general/explore/plan/verify，默认: general）
-  --project-prompt TEXT     项目提示词文本（Layer 3；直接作为字符串注入）
-  --project-prompt-file P   项目提示词文件（.md；支持 @include path 递归展开）
   --no-stream       禁用流式输出（等待完整响应）
   --bypass          --dangerously-bypass-permissions（跳过所有权限询问）
   --request-id ID   指定请求 ID（用于 trace）
@@ -30,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Optional
 
 
 def _parse_args():
@@ -67,17 +66,6 @@ def _parse_args():
         default=None,
         help="覆盖本次任务最大回合数（仅当前命令生效）",
     )
-    pp_group = parser.add_mutually_exclusive_group()
-    pp_group.add_argument(
-        "--project-prompt",
-        default=None,
-        help="项目提示词文本（Layer 3；与 --project-prompt-file 二选一）",
-    )
-    pp_group.add_argument(
-        "--project-prompt-file",
-        default=None,
-        help="项目提示词 Markdown 文件路径（支持 @include path 递归展开）",
-    )
     parser.add_argument(
         "--no-stream",
         action="store_true",
@@ -92,6 +80,16 @@ def _parse_args():
         "--request-id",
         default=None,
         help="指定请求 ID（用于 trace 追踪）",
+    )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="显式指定会话 ID（适合脚本复用；默认每次 CLI 启动生成随机 ID）",
+    )
+    parser.add_argument(
+        "--resume-last",
+        action="store_true",
+        help="自动接上最近一次活跃会话（读取 ~/.whalefall/runtime/state/last_session.txt）",
     )
     parser.add_argument(
         "--no-mcp",
@@ -127,30 +125,8 @@ def _parse_args():
     return parser.parse_args()
 
 
-def _resolve_project_prompt(args) -> str | None:
-    """
-    解析 --project-prompt / --project-prompt-file，返回字符串或 None。
-    文件不存在或读取为空时打印警告并按 None 处理。
-    """
-    if args.project_prompt:
-        return args.project_prompt
-    if args.project_prompt_file:
-        from whalefall.agent.roles import load_project_prompt_from_file
-        text = load_project_prompt_from_file(args.project_prompt_file)
-        if not text.strip():
-            print(
-                f"[警告] --project-prompt-file 读取为空：{args.project_prompt_file}",
-                file=sys.stderr,
-            )
-            return None
-        return text
-    return None
-
-
 def main():
     args = _parse_args()
-
-    project_prompt = _resolve_project_prompt(args)
 
     if args.web:
         from whalefall.ui.web import run as web_run
@@ -159,7 +135,6 @@ def main():
             host=args.host,
             port=args.port,
             model=args.model or "gpt-4o-mini",
-            project_prompt=project_prompt,
         )
         return
 
@@ -224,6 +199,19 @@ def main():
     )
     query_engine = QueryEngine(loop)
 
+    # 解析初始 session_id：优先级 --session-id > --resume-last > 新 UUID
+    initial_sid: Optional[str] = None
+    if args.session_id:
+        initial_sid = args.session_id.strip() or None
+    elif args.resume_last:
+        from whalefall.storage import read_last_session
+        last = read_last_session()
+        if last:
+            initial_sid = last
+            print(f"[resume-last] 接续会话: {initial_sid}")
+        else:
+            print("[resume-last] 无历史会话，按新会话启动。")
+
     # 单次执行模式
     if args.query:
         from whalefall.ui.cli import InteractiveCLI
@@ -236,7 +224,7 @@ def main():
             bypass_permissions=args.bypass,
             request_id=args.request_id,
             max_turns=args.max_turns,
-            project_prompt=project_prompt,
+            session_id=initial_sid,
         )
         try:
             result = cli.run_once(args.query)
@@ -261,7 +249,7 @@ def main():
         bypass_permissions=args.bypass,
         request_id=args.request_id,
         max_turns=args.max_turns,
-        project_prompt=project_prompt,
+        session_id=initial_sid,
     )
     try:
         cli.start()

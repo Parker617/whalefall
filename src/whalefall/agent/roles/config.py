@@ -49,13 +49,13 @@ def is_write_tool(tool_name: str) -> bool:
 
 # 缺省 include：覆盖绝大多数"通用主 Agent"的场景
 # 注：具体工具使用规范下沉到各 BuiltinTool.prompt()，由 TOOL_REFERENCES 自动汇总。
+# 顺序遵循"静态在前 / 动态在后"原则，便于 LLM 端的 prompt caching 命中。
 DEFAULT_INCLUDE: tuple[PromptPart, ...] = (
     PromptPart.BASE_IDENTITY,
-    PromptPart.ENV_INFO,
-    PromptPart.PROJECT_PROMPT,
     PromptPart.SYSTEM_PROMPT,
     PromptPart.GUARDRAILS,
     PromptPart.TOOL_REFERENCES,
+    PromptPart.ENV_INFO,
 )
 
 
@@ -84,9 +84,11 @@ class AgentConfig:
 
     系统提示词装配：
       - system_prompt  : Agent 独有的系统提示词正文（取自 definitions/<name>/AGENT.md body）
-      - include        : PromptPart 顺序列表，控制最终 system prompt 由哪些积木拼成
-                         （注意 PromptPart.PROJECT_PROMPT 的数据源是运行时显式传入的
-                          project_prompt 参数，不会从任何文件系统位置自动读取）
+      - include        : PromptPart 顺序列表，控制最终 system prompt 由哪些积木拼成。
+                         默认顺序为 [BASE_IDENTITY, SYSTEM_PROMPT, GUARDRAILS,
+                         TOOL_REFERENCES, ENV_INFO]——静态块在前、动态块在后，利于
+                         LLM 端 prompt caching 命中。如需完全替换 BASE_IDENTITY，
+                         用 `AgentLoop.run_*(system_prompt=...)` 入参。
     """
     name: str
     description: str = ""

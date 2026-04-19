@@ -44,6 +44,11 @@ def tool_results_dir() -> Path:
     return runtime_root() / "tool_results"
 
 
+def transcripts_dir() -> Path:
+    """全量对话归档目录（每 session 一个 JSONL；永不被 FIFO 削减）。"""
+    return runtime_root() / "transcripts"
+
+
 def state_dir() -> Path:
     return runtime_root() / "state"
 

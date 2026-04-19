@@ -43,7 +43,6 @@ logger = get_logger("whalefall.loop")
 DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000
 MAX_RECENTLY_RESTORED_FILES = 5
 MAX_RECENTLY_RESTORED_CHARS = 50_000
-SKILL_LIST_CHAR_BUDGET = 8_000
 MAX_INVOKED_SKILLS_RESTORED = 4
 MAX_INVOKED_SKILLS_CHARS = 60_000
 
@@ -71,51 +70,22 @@ class AgentLoop:
         agent_config: AgentConfig,
         *,
         custom_base: Optional[str] = None,
-        project_prompt: Optional[str] = None,
     ) -> str:
         """
         按 agent_config.include 声明的顺序装配 system prompt。
 
-        所有静态积木（BASE_IDENTITY / GUARDRAILS / TOOL_USAGE_RULES）与动态积木
-        （ENV_INFO / PROJECT_PROMPT / SYSTEM_PROMPT / TOOL_REFERENCES）都由
-        `whalefall.agent.roles.render_system_prompt()` 统一组装。
+        静态积木（BASE_IDENTITY / SYSTEM_PROMPT / GUARDRAILS / TOOL_REFERENCES）放前面，
+        动态积木（ENV_INFO）放后面，便于 LLM 端 prompt cache 命中。完整装配逻辑由
+        `whalefall.agent.roles.render_system_prompt()` 统一实现。
 
         参数说明：
-          custom_base   : 替换 Layer 1 BASE_IDENTITY（同时跳过 Layer 2 ENV_INFO）
-          project_prompt: Layer 3 "项目提示词"的显式文本；None/空则该层跳过
+          custom_base : 调用方显式传入时整体替换 BASE_IDENTITY，并自动跳过 ENV_INFO
+                        （典型场景：工作流节点，每个节点有自己的专属身份 markdown）
         """
         return render_system_prompt(
             agent_config,
             registry=self._registry,
             custom_base=custom_base,
-            project_prompt=project_prompt,
-        )
-
-    def _build_skill_listing_reminder(self, agent_config: "AgentConfig") -> str:
-        """
-        构建 skills 目录摘要提醒：
-        - 不放进 system prompt 主体
-        - 作为单独 reminder 消息注入对话
-        - 按 agent_config.allowed_skill_paths 过滤，确保 LLM 看到的目录与它实际可加载的一致
-        """
-        if self._registry is None or not self._registry.is_builtin("skill"):
-            return ""
-        try:
-            from whalefall.tools.skill import SkillTool
-            lines = SkillTool.catalog_lines(
-                char_budget=SKILL_LIST_CHAR_BUDGET,
-                allowed_paths=agent_config.allowed_skill_paths,
-            )
-        except Exception as exc:
-            self._logger.warning("build skill listing reminder failed | err=%s", str(exc))
-            return ""
-        if not lines:
-            return ""
-        return (
-            "[系统提醒｜可用 Skills]\n"
-            "以下是可用 skill 摘要（name + description）。"
-            "当任务匹配某个 skill 时，先调用 `skill` 工具加载其全文再执行：\n"
-            + "\n".join(lines)
         )
 
     def __init__(
@@ -182,12 +152,12 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
         extra_messages: Optional[List[Dict[str, Any]]] = None,
         abort_event: Optional[threading.Event] = None,
+        on_message_commit: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> AsyncGenerator[
         Union[TextDeltaEvent, ToolStartEvent, ToolEndEvent, CompactionEvent, DoneEvent],
         None,
@@ -223,13 +193,9 @@ class AgentLoop:
         full_system = self._build_system_prompt(
             agent_config,
             custom_base=system_prompt,
-            project_prompt=project_prompt,
         )
 
         messages: List[Dict[str, Any]] = [{"role": "system", "content": full_system}]
-        skill_listing_reminder = self._build_skill_listing_reminder(agent_config)
-        if skill_listing_reminder:
-            messages.append({"role": "system", "content": skill_listing_reminder})
         if extra_messages:
             messages.extend(extra_messages)
         if parent_context:
@@ -243,9 +209,18 @@ class AgentLoop:
             })
         messages.append({"role": "user", "content": user_query})
         # 本轮会话增量（不含 system），供 QueryEngine 做跨轮持久化
-        session_messages: List[Dict[str, Any]] = [
-            {"role": "user", "content": user_query}
-        ]
+        session_messages: List[Dict[str, Any]] = []
+
+        def _commit(msg: Dict[str, Any]) -> None:
+            """写入会话增量 + 即时触发外部落盘回调（崩溃恢复语义）。"""
+            session_messages.append(msg)
+            if on_message_commit is not None:
+                try:
+                    on_message_commit(msg)
+                except Exception as exc:  # 落盘异常不阻断主流程
+                    rlog.warning("on_message_commit error: %s", exc)
+
+        _commit({"role": "user", "content": user_query})
         final_assistant_recorded = False
 
         tw.log_system(full_system)
@@ -425,7 +400,7 @@ class AgentLoop:
                 if not tool_calls:
                     final_msg = {"role": "assistant", "content": (last_content or "（无回复）")}
                     messages.append(final_msg)
-                    session_messages.append(final_msg)
+                    _commit(final_msg)
                     final_assistant_recorded = True
                     rlog.info("loop done | step=%s no_tool_calls", step)
                     break
@@ -589,7 +564,7 @@ class AgentLoop:
                     "tool_calls": tool_calls,
                 }
                 messages.append(assistant_tool_msg)
-                session_messages.append(assistant_tool_msg)
+                _commit(assistant_tool_msg)
                 for idx, tc in enumerate(tool_calls):
                     fid = tc.get("id", "")
                     fn_name = tc.get("function", {}).get("name", "")
@@ -602,7 +577,7 @@ class AgentLoop:
                             "content": denied_msgs.get(idx, f"权限拒绝：工具 {fn_name} 的执行被拒绝。"),
                         }
                         messages.append(denied_msg)
-                        session_messages.append(denied_msg)
+                        _commit(denied_msg)
                         continue
                     res = result_by_idx.get(idx)
                     if res is None:
@@ -614,7 +589,7 @@ class AgentLoop:
                             "content": f"工具 {fn_name} 未执行（内部调度异常）。",
                         }
                         messages.append(missed_msg)
-                        session_messages.append(missed_msg)
+                        _commit(missed_msg)
                         continue
                     tool_msg = {
                         "role": "tool",
@@ -624,7 +599,7 @@ class AgentLoop:
                         "content": self._truncate_tool_result(fn_name, res.content or "", res.tool_call_id),
                     }
                     messages.append(tool_msg)
-                    session_messages.append(tool_msg)
+                    _commit(tool_msg)
 
             else:
                 rlog.warning("loop ended | reason=max_turns steps=%s", step)
@@ -648,7 +623,7 @@ class AgentLoop:
         if not final_assistant_recorded and last_content:
             # max_turns / doom-loop 等路径下，保证本轮有一个最终 assistant 文本落库
             final_msg = {"role": "assistant", "content": last_content}
-            session_messages.append(final_msg)
+            _commit(final_msg)
 
         tw.finish(ok=True, final_text=last_content, error=None)
         yield DoneEvent(
@@ -666,7 +641,6 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -675,6 +649,8 @@ class AgentLoop:
         on_tool_end: Optional[Callable[[str, str, float], None]] = None,
         on_compaction: Optional[Callable[[int, int], None]] = None,
         extra_messages: Optional[List[Dict[str, Any]]] = None,
+        abort_event: Optional[threading.Event] = None,
+        on_message_commit: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """
         异步主循环（回调风格包装）。消费 run_stream() 并触发各回调。
@@ -685,11 +661,12 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
-            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
             extra_messages=extra_messages,
+            abort_event=abort_event,
+            on_message_commit=on_message_commit,
         ):
             if isinstance(event, TextDeltaEvent):
                 if on_text:
@@ -713,7 +690,6 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -723,6 +699,7 @@ class AgentLoop:
         on_compaction: Optional[Callable[[int, int], None]] = None,
         extra_messages: Optional[List[Dict[str, Any]]] = None,
         abort_event: Optional[threading.Event] = None,
+        on_message_commit: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[str, List[Dict[str, Any]]]:
         """
         run_async 的扩展版：除 final_text 外，额外返回本轮会话消息增量。
@@ -734,12 +711,12 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
-            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
             extra_messages=extra_messages,
             abort_event=abort_event,
+            on_message_commit=on_message_commit,
         ):
             if isinstance(event, TextDeltaEvent):
                 if on_text:
@@ -768,7 +745,6 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -777,6 +753,7 @@ class AgentLoop:
         on_tool_end: Optional[Callable[[str, str, float], None]] = None,
         on_compaction: Optional[Callable[[int, int], None]] = None,
         extra_messages: Optional[List[Dict[str, Any]]] = None,
+        on_message_commit: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """
         同步包装：在当前线程运行异步主循环。
@@ -788,7 +765,6 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
-            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
@@ -797,6 +773,7 @@ class AgentLoop:
             on_tool_end=on_tool_end,
             on_compaction=on_compaction,
             extra_messages=extra_messages,
+            on_message_commit=on_message_commit,
         )
         try:
             loop = asyncio.get_event_loop()
@@ -834,7 +811,6 @@ class AgentLoop:
         *,
         agent_config: Optional[AgentConfig] = None,
         system_prompt: Optional[str] = None,
-        project_prompt: Optional[str] = None,
         model: Optional[str] = None,
         parent_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
@@ -844,6 +820,7 @@ class AgentLoop:
         on_compaction: Optional[Callable[[int, int], None]] = None,
         extra_messages: Optional[List[Dict[str, Any]]] = None,
         abort_event: Optional[threading.Event] = None,
+        on_message_commit: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[str, List[Dict[str, Any]]]:
         """
         run 的扩展版：返回 (final_text, session_messages_delta)。
@@ -853,7 +830,6 @@ class AgentLoop:
             user_query,
             agent_config=agent_config,
             system_prompt=system_prompt,
-            project_prompt=project_prompt,
             model=model,
             parent_context=parent_context,
             request_id=request_id,
@@ -863,6 +839,7 @@ class AgentLoop:
             on_compaction=on_compaction,
             extra_messages=extra_messages,
             abort_event=abort_event,
+            on_message_commit=on_message_commit,
         )
         try:
             loop = asyncio.get_event_loop()

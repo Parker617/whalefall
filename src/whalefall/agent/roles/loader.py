@@ -22,7 +22,6 @@ from whalefall.agent.roles.parts import (
     PromptPart,
     collect_tool_references,
     render_env_info,
-    render_project_prompt,
 )
 from whalefall.core.log import get_logger
 
@@ -157,54 +156,78 @@ def get_agent(name: str) -> AgentConfig:
     return general
 
 
+def render_system_prompt_split(
+    agent: AgentConfig,
+    *,
+    registry: Any = None,
+    custom_base: Optional[str] = None,
+) -> tuple[str, str]:
+    """
+    把 system prompt 拆成 (static_prefix, dynamic_suffix)。
+
+    - **static_prefix**：每次装配字节稳定的部分（身份 / agent body / 守则 /
+      工具使用指引）。LLM provider 的 prompt cache 可以把它当成长前缀命中。
+    - **dynamic_suffix**：每次装配都会变（ENV_INFO 带日期时间）。放在最后，
+      不会破坏前缀缓存。
+
+    顺序遵循 `agent.include`；如果 ENV_INFO 被声明，它会被隔离到 dynamic 段。
+    `custom_base` 非空时整体替换 BASE_IDENTITY，并强制跳过 ENV_INFO（节点型
+    调用方自己控制上下文，不需要框架再注入环境信息）。
+    """
+    static_parts: List[str] = []
+    dynamic_parts: List[str] = []
+    seen_base = False
+
+    for part in agent.include:
+        if part == PromptPart.BASE_IDENTITY:
+            static_parts.append(custom_base if custom_base else BASE_IDENTITY)
+            seen_base = True
+        elif part == PromptPart.ENV_INFO:
+            if not (seen_base and custom_base):
+                dynamic_parts.append(render_env_info())
+        elif part == PromptPart.SYSTEM_PROMPT:
+            if agent.system_prompt:
+                static_parts.append(agent.system_prompt)
+        elif part == PromptPart.GUARDRAILS:
+            static_parts.append(BEHAVIOR_GUARDRAILS)
+        elif part == PromptPart.TOOL_REFERENCES:
+            tr = collect_tool_references(registry)
+            if tr:
+                static_parts.append(tr)
+
+    static_prefix = "\n\n".join(p for p in static_parts if p)
+    dynamic_suffix = "\n\n".join(p for p in dynamic_parts if p)
+    return static_prefix, dynamic_suffix
+
+
 def render_system_prompt(
     agent: AgentConfig,
     *,
     registry: Any = None,
     custom_base: Optional[str] = None,
-    project_prompt: Optional[str] = None,
 ) -> str:
     """
-    按 agent.include 声明的顺序装配最终 system prompt。
+    按 agent.include 声明的顺序装配最终 system prompt（合并静态 + 动态段）。
 
     积木语义：
-      BASE_IDENTITY    → 通用身份文本；若 custom_base 传入则用它替代（此时同时跳过 ENV_INFO）
-      ENV_INFO         → 当前环境信息（日期/cwd/平台）
-      PROJECT_PROMPT   → 项目提示词（由调用方显式传入的 project_prompt 字符串；None/空串则整段跳过）
+      BASE_IDENTITY    → 通用身份文本；若 custom_base 传入则用它整体替代（此时同时跳过 ENV_INFO）
       SYSTEM_PROMPT    → agent.system_prompt（来自 definitions/<name>/AGENT.md body）
       GUARDRAILS       → 通用诚实约束 + 写操作前置检查
       TOOL_REFERENCES  → 内建工具的 prompt() 汇总（具体工具使用规范下沉到这里）
+      ENV_INFO         → 当前环境信息（日期/cwd/平台）——动态块，被 `render_system_prompt_split`
+                         隔离在末尾，利于 provider 端 prompt cache 命中静态前缀。
 
     设计说明：
-      项目提示词层只认参数，不读文件系统；如需从文件读，调用方先用
-      `parts.load_project_prompt_from_file()` 转成 str 再传入。
+      要针对某个任务/节点**整体替换身份**（如量化分析节点），用
+      `AgentLoop.run_*(system_prompt=...)` 传入完整 markdown；该参数对应
+      `custom_base` 形参，会替换 BASE_IDENTITY 并自动跳过 ENV_INFO。
     """
-    parts: List[str] = []
-    seen_base = False
-
-    for part in agent.include:
-        if part == PromptPart.BASE_IDENTITY:
-            parts.append(custom_base if custom_base else BASE_IDENTITY)
-            seen_base = True
-        elif part == PromptPart.ENV_INFO:
-            # custom_base 已包含调用方自己的开场，跳过环境信息避免重复
-            if not (seen_base and custom_base):
-                parts.append(render_env_info())
-        elif part == PromptPart.PROJECT_PROMPT:
-            pp = render_project_prompt(project_prompt)
-            if pp:
-                parts.append(pp)
-        elif part == PromptPart.SYSTEM_PROMPT:
-            if agent.system_prompt:
-                parts.append(agent.system_prompt)
-        elif part == PromptPart.GUARDRAILS:
-            parts.append(BEHAVIOR_GUARDRAILS)
-        elif part == PromptPart.TOOL_REFERENCES:
-            tr = collect_tool_references(registry)
-            if tr:
-                parts.append(tr)
-
-    return "\n\n".join(p for p in parts if p)
+    static_prefix, dynamic_suffix = render_system_prompt_split(
+        agent, registry=registry, custom_base=custom_base
+    )
+    if static_prefix and dynamic_suffix:
+        return static_prefix + "\n\n" + dynamic_suffix
+    return static_prefix or dynamic_suffix
 
 
 __all__ = [
@@ -212,4 +235,5 @@ __all__ = [
     "list_agent_names",
     "get_agent",
     "render_system_prompt",
+    "render_system_prompt_split",
 ]

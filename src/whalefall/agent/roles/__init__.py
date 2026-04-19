@@ -24,14 +24,13 @@ from whalefall.agent.roles.parts import (
     BASE_IDENTITY,
     BEHAVIOR_GUARDRAILS,
     render_env_info,
-    render_project_prompt,
-    load_project_prompt_from_file,
     collect_tool_references,
 )
 from whalefall.agent.roles.loader import (
     load_agents,
     get_agent,
     render_system_prompt,
+    render_system_prompt_split,
     list_agent_names,
 )
 
@@ -44,11 +43,10 @@ __all__ = [
     "BASE_IDENTITY",
     "BEHAVIOR_GUARDRAILS",
     "render_env_info",
-    "render_project_prompt",
-    "load_project_prompt_from_file",
     "collect_tool_references",
     "load_agents",
     "get_agent",
     "render_system_prompt",
+    "render_system_prompt_split",
     "list_agent_names",
 ]

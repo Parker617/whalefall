@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import threading
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from whalefall.core.log import get_logger
@@ -46,11 +46,6 @@ _abort_events: dict[str, threading.Event] = {}
 _abort_events_lock = threading.Lock()
 _default_model: str = "gpt-4o-mini"
 _strict_cold_start: bool = False
-# 启动时 CLI 通过 --project-prompt/--project-prompt-file 传入的全局默认值；
-# 新会话首次出现时会自动落入该 session 的 project_prompt，之后仍可通过
-# /api/sessions/<sid>/project-prompt 或 UI 侧栏单独覆盖。
-_initial_project_prompt: str | None = None
-_seeded_sessions: set[str] = set()
 # 软重载期间屏蔽新请求，避免访问半初始化状态的全局单例
 _services_lock = threading.Lock()
 _reloading: bool = False
@@ -107,32 +102,6 @@ def _teardown_services() -> None:
     _mcp_client = None
     _perm_manager = None
     _query_engine = None
-    # reload/restart 后需要重新 seed 项目提示词到新 QueryEngine 的 session_store
-    _seeded_sessions.clear()
-
-
-def _ensure_session_seeded(session_id: str) -> None:
-    """
-    新会话首次出现时，把 CLI 启动参数里的项目提示词注入到 session_store。
-    已手动 set/clear 过的 session 不会被覆盖（QueryEngine 只在未存值时兜底）。
-    """
-    if not _initial_project_prompt or _query_engine is None:
-        return
-    if session_id in _seeded_sessions:
-        return
-    _seeded_sessions.add(session_id)
-    try:
-        existing = _query_engine.get_project_prompt(session_id)
-    except Exception:
-        existing = None
-    if existing:
-        return  # 会话已有自己的值，不动
-    try:
-        _query_engine.set_project_prompt(session_id, _initial_project_prompt)
-        logger.info("seeded project_prompt to new session | sid=%s", session_id)
-    except Exception:
-        logger.exception("seed project_prompt failed | sid=%s", session_id)
-
 
 def _init_services(*, tag: str = "startup") -> str | None:
     """
@@ -342,58 +311,6 @@ async def api_abort_session(session_id: str):
     return {"ok": False, "reason": "no active run"}
 
 
-@app.get("/api/sessions/{session_id}/project-prompt")
-async def api_get_project_prompt(session_id: str):
-    """读取某会话的项目提示词（Layer 3）。返回 {"prompt": str | null}。"""
-    if _query_engine is None:
-        return {"ok": False, "error": "未初始化"}
-    try:
-        prompt = _query_engine.get_project_prompt(session_id)
-    except Exception as exc:
-        logger.exception("get project prompt failed | sid=%s", session_id)
-        return {"ok": False, "error": str(exc)}
-    return {"ok": True, "session_id": session_id, "prompt": prompt}
-
-
-@app.put("/api/sessions/{session_id}/project-prompt")
-async def api_set_project_prompt(
-    session_id: str,
-    payload: dict = Body(default=None),
-):
-    """
-    设定或清除某会话的项目提示词。
-
-    Body:
-      {"prompt": "# 项目..."}     设定；持久化到 session_store
-      {"prompt": null} / {}       清除
-      {"prompt": ""}              清除（等同 null）
-    """
-    if _query_engine is None:
-        return {"ok": False, "error": "未初始化"}
-    if payload is None:
-        payload = {}
-    raw = payload.get("prompt") if isinstance(payload, dict) else None
-    if raw is None:
-        new_value: str | None = None
-    elif isinstance(raw, str):
-        trimmed = raw.strip()
-        new_value = trimmed or None
-    else:
-        return {"ok": False, "error": "prompt 必须是字符串或 null"}
-    try:
-        _query_engine.set_project_prompt(session_id, new_value)
-    except Exception as exc:
-        logger.exception("set project prompt failed | sid=%s", session_id)
-        return {"ok": False, "error": str(exc)}
-    _seeded_sessions.add(session_id)  # 不再用启动默认值覆盖
-    return {
-        "ok": True,
-        "session_id": session_id,
-        "prompt": new_value,
-        "length": len(new_value) if new_value else 0,
-    }
-
-
 @app.get("/api/sessions/{session_id}/messages")
 async def api_session_messages(session_id: str):
     if _query_engine is None:
@@ -463,22 +380,6 @@ async def ws_endpoint(websocket: WebSocket):
             model = raw.get("model") or None
             agent_config = get_agent(agent_type)
 
-            # 新会话首次出现时尝试用 CLI 启动参数 seed 项目提示词；
-            # 已手动覆盖过的会话不受影响。
-            _ensure_session_seeded(session_id)
-
-            # 允许单条消息临时覆盖项目提示词：
-            #   project_prompt 缺省 / null → 沿用 session 已存值（兜底）
-            #   非空字符串              → 本轮覆盖并持久化
-            #   空串 ""                → 清除会话项目提示词
-            pp_raw = raw.get("project_prompt", None)
-            if pp_raw is None:
-                ws_project_prompt = None
-            elif isinstance(pp_raw, str):
-                ws_project_prompt = pp_raw  # "" 语义交给 QueryEngine
-            else:
-                ws_project_prompt = None
-
             # ── 回调：从 AgentLoop 子线程安全发送到 FastAPI 主事件循环 ──
             pending_sends = []
             send_lock = threading.Lock()
@@ -543,7 +444,6 @@ async def ws_endpoint(websocket: WebSocket):
                         user_query=query,
                         agent_config=agent_config,
                         model=model,
-                        project_prompt=ws_project_prompt,
                         request_id=f"{session_id}-{uuid4().hex[:8]}",
                         on_text=on_text,
                         on_tool_start=on_tool_start,
@@ -595,20 +495,10 @@ def run(
     port: int = 8000,
     reload: bool = False,
     model: str = "gpt-4o-mini",
-    project_prompt: str | None = None,
 ):
-    """
-    启动 FastAPI + WebSocket 服务。
-
-    project_prompt 会作为"全局默认项目提示词"；每个 WebSocket 新会话首次
-    出现时自动 seed 进去，之后可通过侧栏面板或 REST 端点单独覆盖。
-    """
-    global _default_model, _initial_project_prompt
+    """启动 FastAPI + WebSocket 服务。"""
+    global _default_model
     _default_model = model
-    if project_prompt and project_prompt.strip():
-        _initial_project_prompt = project_prompt
-    else:
-        _initial_project_prompt = None
     import uvicorn
     uvicorn.run(
         "whalefall.ui.web:app",
