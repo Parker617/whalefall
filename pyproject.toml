@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "whalefall"
 version = "0.1.0"
-description = "A local LLM agent harness: drive an OpenAI-compatible model through built-in tools, MCP plugins, skill docs, and subagents."
+description = "A hackable, local agent harness in pure Python: Claude Code-style tools, MCP, skills, subagents, and an 8-step permission pipeline. Works with OpenAI, DeepSeek, Qwen, Ollama, and any OpenAI-compatible model."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -15,23 +15,52 @@ authors = [
 keywords = [
     "llm",
     "agent",
+    "ai-agent",
+    "llm-agent",
     "agent-harness",
+    "agent-framework",
+    "autonomous-agent",
+    "coding-agent",
+    "terminal-agent",
+    "cli-agent",
     "mcp",
+    "model-context-protocol",
     "openai",
-    "tools",
+    "anthropic",
+    "deepseek",
+    "qwen",
+    "ollama",
+    "local-llm",
+    "self-hosted",
     "claude-code",
+    "claude-code-alternative",
+    "cursor-alternative",
+    "aider-alternative",
+    "tool-calling",
+    "function-calling",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Utilities",
+    "Environment :: Console",
+    "Environment :: Web Environment",
 ]
 dependencies = [
     "openai>=1.40.0",
@@ -60,6 +89,8 @@ whalefall = "whalefall.main:main"
 Homepage = "https://github.com/Parker617/whalefall"
 Repository = "https://github.com/Parker617/whalefall"
 Issues = "https://github.com/Parker617/whalefall/issues"
+Documentation = "https://github.com/Parker617/whalefall#readme"
+Changelog = "https://github.com/Parker617/whalefall/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/whalefall"]

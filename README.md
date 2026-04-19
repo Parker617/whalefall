@@ -18,9 +18,12 @@ Inspired by the overall shape of [Claude Code](https://github.com/anthropics/cla
 - **8-step permission pipeline** — hook / bypass / skip / always-allow / rule / mode / deny / prompt; explicitly-declared write tools need user approval unless bypassed.
 - **BashGuard** — an `ll`-lite classifier that flags destructive `rm -rf /`, pipes to `sh`, hidden network calls, etc. before the shell sees them.
 - **Triple-layer context compression** — `microcompact` (truncate old tool results), `auto_compact` (summarize after 92% of context), `precompact` (eager summary before the next turn if projected to overflow).
-- **Resume-capable sessions** — every turn persists to `.runtime/`; crash mid-generation, restart, pick up right where the last completed tool call landed.
+- **Write-ahead persistence** — every user / assistant / tool message hits SQLite **the instant it's produced**, so a crash mid-tool at most loses the assistant text still in the decoder buffer; on reload, orphan `tool_calls` with no matching `tool_result` are filtered out so the next turn starts from a consistent state.
+- **Full transcript archive** — alongside the capped SQLite history (FIFO'd when it exceeds `max_history_messages`), Whalefall appends every message to `.runtime/transcripts/<sid>.jsonl` which is never truncated — great for audit & replay.
+- **Prompt-cache friendly layout** — `render_system_prompt_split()` separates the static prefix (identity + agent body + guardrails + tool blurbs) from the dynamic tail (date/cwd/env). Static bytes are stable across turns so Anthropic/OpenAI prefix caches can actually hit.
+- **`--resume-last` / `/resume-last`** — CLI remembers the last active session id in `~/.whalefall/runtime/state/last_session.txt`; a single flag resumes it in place, matching what the Web UI already does via `localStorage`.
 - **Web UI with live tool trace** — FastAPI + WebSocket; soft-reload config on the fly (`🔄`) or hot-replace code via `os.execv` (`♻️`) — no need to leave the browser.
-- **Explicit project prompt (Layer 3)** — inject project-specific guidance via `--project-prompt[-file]`, `/project` slash command, the Web sidebar panel, or `QueryEngine.submit(project_prompt=...)`. **Zero filesystem sniffing**: nothing is auto-read from `cwd`; you always know exactly what the model sees.
+- **Explicit system prompt** — the default identity can be swapped wholesale via `AgentLoop.run_*(system_prompt=...)`. **Zero filesystem sniffing**: nothing is auto-read from `cwd`; you always know exactly what the model sees.
 
 See `src/whalefall/README.md` for the ~700-line design document.
 
@@ -71,40 +74,29 @@ whalefall --agent explore "find every todo comment"
 whalefall --agent plan    "design a migration from v1 to v2 of this schema"
 whalefall --agent verify  "audit the analysis above"
 
+# Pick up where you left off
+whalefall --resume-last
+# or in an interactive session: /resume-last  /sessions  /resume <sid>
+
 # Web UI
 whalefall --web --port 8000
 # open http://localhost:8000
 ```
 
-### 5. (Optional) Project prompt — explicit, never auto-loaded
+### 5. (Optional) Customize the system prompt
 
-Whalefall does **not** scan `cwd/AGENT.md`, `cwd/PROJECT.md`, or anything similar. Project-level guidance is injected at **Layer 3** of the system prompt only when you ask for it:
+Whalefall does **not** scan any markdown file from `cwd` (no auto-discovery). The system prompt is assembled from each agent's `agent/roles/definitions/<name>/AGENT.md` body. Two ways to inject custom rules:
 
-```bash
-# CLI: one-shot string
-whalefall --project-prompt "Always answer in English. Prefer pathlib over os.path." "..."
+1. **Edit the agent definition.** Change the body of `definitions/general/AGENT.md`, or drop a new folder `definitions/my_project/AGENT.md` and call it via `whalefall --agent my_project ...`. This is the long-term choice.
+2. **Replace the identity on a single call.** Pass a markdown string as `system_prompt=` when calling `AgentLoop.run_*()`; it replaces the default `BASE_IDENTITY` block and suppresses the auto-generated env info, leaving your markdown fully in control. Useful for workflow nodes where each step needs its own persona.
 
-# CLI: load from a markdown file (supports @include path, recursion depth 3)
-whalefall --project-prompt-file ./PROJECT.md "..."
-
-# CLI interactive: runtime management (persists into the current session)
-whalefall
-> /project                 # show current
-> /project set Always answer in English.
-> /project load ./PROJECT.md
-> /project clear
-> /init                    # create a PROJECT.md template in cwd (you must still /project load it)
-
-# Web UI: sidebar panel "项目提示词" — write / drag-drop / save / clear
-whalefall --web --project-prompt-file ./PROJECT.md   # also seeds new sessions
-
-# REST (per session)
-curl -X PUT -H "Content-Type: application/json" \
-  -d '{"prompt":"# Project rules\nUse Chinese."}' \
-  http://localhost:8000/api/sessions/<sid>/project-prompt
-
-# Python
-qe.submit("...", session_id="demo", project_prompt="# Project rules\n...")
+```python
+from whalefall.agent.loop import AgentLoop
+loop = AgentLoop(...)
+answer = loop.run(
+    user_query="...",
+    system_prompt="# You are a data-quality auditor.\nReply with VERDICT: ...",
+)
 ```
 
 ---
