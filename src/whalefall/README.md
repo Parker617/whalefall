@@ -85,7 +85,6 @@ QueryEngine 回收：
 ```
 src/whalefall/
 ├── main.py                      ← CLI 入口；解析 --agent/--model/--web 等并装配组件
-├── AGENT.md                     ← 项目级提示词（空文件也 OK；支持 @include path 递归 3 层）
 ├── README.md                    ← 本文件
 │
 ├── .runtime/                    ← 所有运行态（WHALEFALL_RUNTIME_DIR 可覆盖）
@@ -272,7 +271,7 @@ include: [base_identity, env_info, system_prompt, guardrails, tool_references]
 ```text
 Layer 1: base_identity        ← 通用身份 + 核心行为准则（parts.py::BASE_IDENTITY）
 Layer 2: env_info             ← 日期 / cwd / 平台 / 斜杠命令提示（每次渲染重算）
-Layer 3: agent_md             ← 项目级 src/whalefall/AGENT.md（支持 @include path 递归 3 层）
+Layer 3: agent_md             ← 项目级 `./AGENT.md`（从 cwd 读，`/init` 可一键生成；支持 @include path 递归 3 层）
 Layer 4: system_prompt        ← 各 Agent AGENT.md 正文（agent 独有）
 Layer 5: guardrails           ← 诚实与执行约束（写操作前置检查）
 Layer 6: tool_references      ← 已注册每个 BuiltinTool.prompt() 汇总；附 [工具使用指引] 标题

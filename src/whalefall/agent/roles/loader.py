@@ -169,7 +169,7 @@ def render_system_prompt(
     积木语义：
       BASE_IDENTITY    → 通用身份文本；若 custom_base 传入则用它替代（此时同时跳过 ENV_INFO）
       ENV_INFO         → 当前环境信息（日期/cwd/平台）
-      AGENT_MD         → whalefall/AGENT.md 项目配置
+      AGENT_MD         → cwd/AGENT.md 项目配置（由 `/init` 生成）
       SYSTEM_PROMPT    → agent.system_prompt（AGENT.md body）
       GUARDRAILS       → 通用诚实约束 + 写操作前置检查
       TOOL_REFERENCES  → 内建工具的 prompt() 汇总（具体工具使用规范下沉到这里）

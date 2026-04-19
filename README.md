@@ -30,7 +30,7 @@ See `src/whalefall/README.md` for the ~700-line design document.
 ### 1. Install
 
 ```bash
-git clone https://github.com/parker-chao/whalefall.git
+git clone https://github.com/Parker617/whalefall.git
 cd whalefall
 pip install -e '.[web]'
 ```

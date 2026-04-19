@@ -28,7 +28,7 @@ class PromptPart(str, Enum):
     """系统提示词积木组件。"""
     BASE_IDENTITY = "base_identity"      # 通用身份 + 核心行为准则
     ENV_INFO = "env_info"                # 当前日期/cwd/平台 + 斜杠命令提示
-    AGENT_MD = "agent_md"                # whalefall/AGENT.md 项目级配置
+    AGENT_MD = "agent_md"                # cwd/AGENT.md 项目级配置（用户工程根，/init 可生成）
     SYSTEM_PROMPT = "system_prompt"      # agent 自己的 system_prompt 正文
     GUARDRAILS = "guardrails"            # 通用诚实约束 + 写操作前置检查
     TOOL_REFERENCES = "tool_references"  # 内建工具 prompt() 汇总
@@ -103,12 +103,18 @@ def _read_md_file(path: Path, *, _depth: int = 0) -> str:
 
 def load_project_agent_md() -> str:
     """
-    加载项目级 AGENT.md：位于 whalefall 包根目录（与 agent/ 同级）。
-    找不到返回空串；非空时带 `[项目配置 AGENT.md]` 前缀包装。
+    加载项目级 AGENT.md：位于当前工作目录（`Path.cwd()`）。
+
+    约定：
+      - 用户可通过 `/init` 在项目根一键生成模板
+      - 内容会注入到每个 agent 的 system prompt（标 `[项目配置 AGENT.md]` 前缀）
+      - 找不到 / 内容为空 → 返回空串，整段跳过，不打扰 LLM
+      - 支持 `@include path`（相对当前文件所在目录解析，最多递归 3 层）
+
+    设计权衡：早期版本从 whalefall 包根读，pip install 后就与 `/init` 行为脱节。
+    现统一为 cwd —— 谁调用 whalefall、谁的项目根提供配置。
     """
-    # parts.py -> roles/ -> agent/ -> whalefall/
-    whalefall_root = Path(__file__).resolve().parents[2]
-    md = whalefall_root / "AGENT.md"
+    md = Path.cwd() / "AGENT.md"
     if not md.exists():
         return ""
     content = _read_md_file(md)
