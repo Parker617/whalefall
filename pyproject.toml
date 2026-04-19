@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whalefall"
+version = "0.1.0"
+description = "A local LLM agent harness: drive an OpenAI-compatible model through built-in tools, MCP plugins, skill docs, and subagents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Parker Chao" },
+]
+keywords = [
+    "llm",
+    "agent",
+    "agent-harness",
+    "mcp",
+    "openai",
+    "tools",
+    "claude-code",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "openai>=1.40.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "tiktoken>=0.7.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+whalefall = "whalefall.main:main"
+
+[project.urls]
+Homepage = "https://github.com/Parker617/whalefall"
+Repository = "https://github.com/Parker617/whalefall"
+Issues = "https://github.com/Parker617/whalefall/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whalefall"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/whalefall/skills" = "whalefall/skills"
+"src/whalefall/agent/roles/definitions" = "whalefall/agent/roles/definitions"
+"src/whalefall/ui/static" = "whalefall/ui/static"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["src/whalefall/tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

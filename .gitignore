@@ -1,0 +1,55 @@
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# ── 虚拟环境 ───────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── 测试 / 覆盖率 ──────────────────────────────────────────────────────
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ── 类型检查 / Lint ────────────────────────────────────────────────────
+.mypy_cache/
+.pyright/
+.ruff_cache/
+basedpyright.json.cache
+
+# ── IDE / OS ───────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── whalefall 运行产物（含 session 历史 / trace / transcript 等隐私数据）──
+**/.runtime/
+**/.whalefall-runtime/
+
+# ── 含真实 API key、绝对路径的配置（只提交 .example）──────────────────
+src/whalefall/llm/config/llm_config.ini
+src/whalefall/mcp/config.yaml
+
+# ── jupyter ───────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── 日志 ───────────────────────────────────────────────────────────────
+*.log

@@ -1,0 +1,41 @@
+; whalefall LLM 配置模板。
+;
+; 使用方法：
+;   1. 复制一份为 llm_config.ini（同目录）
+;   2. 把 <YOUR_*_KEY> 换成你自己的 key
+;   3. 首次启动时通过 --model <alias> 指定用哪个
+;
+; 别名命名建议：
+;   - 短小可读，方便命令行传参：gpt-4o、gpt-4o-mini、claude-sonnet、deepseek-v3 等
+;   - 命名格式：<alias>_model, <alias>_url, <alias>_context, <alias>_key
+
+[models]
+
+; ── OpenAI ───────────────────────────────────────────────────────────────
+gpt-4o-mini_model = gpt-4o-mini
+gpt-4o-mini_url = https://api.openai.com/v1/chat/completions
+gpt-4o-mini_context = 128000
+gpt-4o-mini_key = <YOUR_OPENAI_KEY>
+
+gpt-4o_model = gpt-4o
+gpt-4o_url = https://api.openai.com/v1/chat/completions
+gpt-4o_context = 128000
+gpt-4o_key = <YOUR_OPENAI_KEY>
+
+; ── OpenAI 兼容：DeepSeek ────────────────────────────────────────────────
+deepseek-v3_model = deepseek-chat
+deepseek-v3_url = https://api.deepseek.com/v1/chat/completions
+deepseek-v3_context = 128000
+deepseek-v3_key = <YOUR_DEEPSEEK_KEY>
+
+; ── OpenAI 兼容：阿里百炼（DashScope）─────────────────────────────────────
+qwen-max_model = qwen-max
+qwen-max_url = https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+qwen-max_context = 32768
+qwen-max_key = <YOUR_DASHSCOPE_KEY>
+
+; ── OpenAI 兼容：本地 Ollama（示例）───────────────────────────────────────
+; ollama-llama3_model = llama3
+; ollama-llama3_url = http://localhost:11434/v1/chat/completions
+; ollama-llama3_context = 8192
+; ollama-llama3_key = ollama

@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>whalefall</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0f1117;
+    --surface:  #1a1d27;
+    --surface2: #13151f;
+    --border:   #2a2d3e;
+    --accent:   #5b6ef5;
+    --accent2:  #3d4fd4;
+    --text:     #e2e4f0;
+    --muted:    #7a7f99;
+    --user-bg:  #1e2d5a;
+    --tool-bg:  #12161f;
+    --green:    #4ade80;
+    --red:      #f87171;
+    --yellow:   #fbbf24;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── 顶栏 ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 15px; font-weight: 600; color: var(--accent); }
+  header .spacer { flex: 1; }
+
+  select, input[type=text] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 13px;
+    outline: none;
+  }
+  select:focus, input:focus { border-color: var(--accent); }
+
+  .icon-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .icon-btn:hover:not(:disabled) { background: var(--accent2); border-color: var(--accent); }
+  .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .status-dot.connected { background: var(--green); }
+
+  /* ── 主工作区 ── */
+  .workspace {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── 侧边栏 ── */
+  .sidebar {
+    width: 220px;
+    min-width: 180px;
+    max-width: 280px;
+    background: var(--surface2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .sidebar-top {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  #new-chat-btn {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: background .15s;
+  }
+  #new-chat-btn:hover { background: var(--accent2); }
+  #new-chat-btn .plus { font-size: 16px; line-height: 1; }
+
+  .sidebar-label {
+    padding: 10px 12px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    flex-shrink: 0;
+  }
+
+  .session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding-bottom: 8px;
+  }
+  .session-list::-webkit-scrollbar { width: 4px; }
+  .session-list::-webkit-scrollbar-track { background: transparent; }
+  .session-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .session-item {
+    padding: 9px 12px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: background .1s;
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .session-item:hover { background: rgba(91,110,245,.08); }
+  .session-item.active {
+    background: rgba(91,110,245,.12);
+    border-left-color: var(--accent);
+  }
+  .session-item-body {
+    flex: 1;
+    min-width: 0;
+  }
+  .session-preview {
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.4;
+  }
+  .session-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+    display: flex;
+    gap: 6px;
+  }
+  .session-del {
+    opacity: 0;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
+    flex-shrink: 0;
+    align-self: center;
+    transition: color .15s, opacity .15s;
+  }
+  .session-item:hover .session-del { opacity: 1; }
+  .session-del:hover { color: var(--red); }
+  .session-empty {
+    padding: 16px 12px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* ── 侧边栏底部清理区 ── */
+  .sidebar-footer {
+    border-top: 1px solid var(--border);
+    padding: 10px 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-footer-label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .clean-btns {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .clean-btn {
+    flex: 1;
+    padding: 5px 4px;
+    font-size: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s;
+    white-space: nowrap;
+  }
+  .clean-btn:hover { border-color: var(--red); color: var(--red); }
+
+  /* ── 对话区包装 ── */
+  .chat-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  /* ── 对话区 ── */
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .msg-row {
+    display: flex;
+    padding: 6px 20px;
+    gap: 12px;
+  }
+  .msg-row.user { flex-direction: row-reverse; }
+
+  .avatar {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .avatar.ai  { background: var(--accent);  color: #fff; }
+  .avatar.usr { background: #3a4a7a;        color: #fff; }
+
+  .bubble {
+    max-width: 72%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg-row.user  .bubble { background: var(--user-bg); border-radius: 12px 2px 12px 12px; }
+  .msg-row.agent .bubble { background: var(--surface);  border-radius: 2px 12px 12px 12px; }
+
+  /* ── 工具事件 ── */
+  .tool-block {
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .tool-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px;
+    background: var(--tool-bg);
+    cursor: pointer;
+    user-select: none;
+  }
+  .tool-icon { font-size: 14px; }
+  .tool-name { font-weight: 600; color: var(--accent); }
+  .tool-elapsed { color: var(--muted); margin-left: auto; }
+  .tool-status { font-size: 11px; }
+  .tool-status.ok  { color: var(--green); }
+  .tool-status.err { color: var(--red); }
+  .tool-status.running { color: var(--yellow); }
+  .tool-body {
+    padding: 8px 10px;
+    background: var(--tool-bg);
+    border-top: 1px solid var(--border);
+    display: none;
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--muted);
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .tool-body.open { display: block; }
+
+  /* ── 压缩通知 ── */
+  .compact-notice {
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 4px 0;
+    margin: 4px 20px;
+    border-top: 1px dashed var(--border);
+    border-bottom: 1px dashed var(--border);
+  }
+
+  /* ── 历史分隔线 ── */
+  .history-divider {
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 6px 0;
+    margin: 8px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── 光标 ── */
+  .cursor {
+    display: inline-block;
+    width: 2px; height: 14px;
+    background: var(--accent);
+    margin-left: 1px;
+    vertical-align: middle;
+    animation: blink .7s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── 输入区 ── */
+  footer {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .input-row {
+    display: flex; gap: 10px; align-items: flex-end;
+  }
+  #input {
+    flex: 1;
+    min-height: 42px; max-height: 160px;
+    padding: 10px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    font-family: inherit;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send-btn {
+    height: 42px; width: 42px;
+    border: none; border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background .15s;
+  }
+  #send-btn:hover:not(:disabled) { background: var(--accent2); }
+  #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  #stop-btn {
+    height: 42px; width: 42px;
+    border: none; border-radius: 10px;
+    background: var(--red);
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: none;
+    align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background .15s;
+  }
+  #stop-btn:hover { background: #dc2626; }
+  #stop-btn.visible { display: flex; }
+
+  /* ── 滚动条 ── */
+  #chat::-webkit-scrollbar { width: 5px; }
+  #chat::-webkit-scrollbar-track { background: transparent; }
+  #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>whalefall</h1>
+  <div class="spacer"></div>
+  <select id="agent-select">
+    <option value="general">General</option>
+    <option value="explore">Explore（只读）</option>
+    <option value="plan">Plan（规划）</option>
+    <option value="verify">Verify（验证）</option>
+  </select>
+  <input type="text" id="model-input" placeholder="留空使用默认模型；可填 llm_config.ini 中的任意别名" style="width:320px">
+  <button id="reload-btn" class="icon-btn" title="软重载：重建 LLM / MCP / QueryEngine，重读 llm_config.ini 和 mcp/config.yaml。&#10;进程不重启，WS 不断。&#10;Python 代码改动不生效。">🔄</button>
+  <button id="restart-btn" class="icon-btn" title="硬重启：os.execv 自替换当前进程，恢复所有 Python 代码改动。&#10;WebSocket 断开约 3~5 秒后自动重连。">♻️</button>
+  <div class="status-dot" id="status-dot" title="WebSocket 状态"></div>
+</header>
+
+<div class="workspace">
+
+  <!-- ── 侧边栏 ── -->
+  <div class="sidebar">
+    <div class="sidebar-top">
+      <button id="new-chat-btn"><span class="plus">＋</span>新建会话</button>
+    </div>
+    <div class="sidebar-label">历史会话</div>
+    <div class="session-list" id="session-list">
+      <div class="session-empty">加载中…</div>
+    </div>
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-label">清理历史会话</div>
+      <div class="clean-btns">
+        <button class="clean-btn" data-days="1">1天前</button>
+        <button class="clean-btn" data-days="3">3天前</button>
+        <button class="clean-btn" data-days="7">7天前</button>
+        <button class="clean-btn" data-days="30">30天前</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 聊天区 ── -->
+  <div class="chat-wrap">
+    <div id="chat"></div>
+    <footer>
+      <div class="input-row">
+        <textarea id="input" placeholder="输入问题，Enter 发送，Shift+Enter 换行…" rows="1"></textarea>
+        <button id="send-btn" title="发送">↑</button>
+        <button id="stop-btn" title="停止">■</button>
+      </div>
+      <div style="margin-top:8px;color:var(--muted);font-size:12px;">
+        命令：<code>/help</code> <code>/clear</code> <code>/stats</code> <code>/compact</code> <code>/resume</code>
+      </div>
+    </footer>
+  </div>
+
+</div>
+
+<script>
+// ── WebSocket ─────────────────────────────────────────────────────────────
+let ws = null;
+let busy = false;
+let currentBubble = null;
+let currentTools = {};
+
+function createSessionId() {
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+let sessionId = localStorage.getItem('whalefall_session_id') || createSessionId();
+localStorage.setItem('whalefall_session_id', sessionId);
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('status-dot').classList.add('connected');
+    if (busy) {
+      setBusy(false);
+      finishBubble();
+      appendSystemMsg('⚠ 连接已恢复，上一条请求可能未完成，请重新发送。', true);
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('status-dot').classList.remove('connected');
+    setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    handleMsg(msg);
+  };
+}
+
+// ── 消息处理 ──────────────────────────────────────────────────────────────
+function handleMsg(msg) {
+  switch (msg.type) {
+
+    case 'text': {
+      if (!currentBubble) currentBubble = startAgentBubble();
+      const old = currentBubble.querySelector('.cursor');
+      if (old) old.remove();
+      currentBubble.appendChild(document.createTextNode(msg.delta));
+      const cur = document.createElement('span');
+      cur.className = 'cursor';
+      currentBubble.appendChild(cur);
+      scrollBottom();
+      break;
+    }
+
+    case 'tool_start': {
+      if (!currentBubble) currentBubble = startAgentBubble();
+      const block = makeToolBlock(msg.name, msg.args);
+      currentBubble.appendChild(block);
+      if (!currentTools[msg.name]) currentTools[msg.name] = [];
+      currentTools[msg.name].push(block);
+      scrollBottom();
+      break;
+    }
+
+    case 'tool_end': {
+      const queue = currentTools[msg.name] || [];
+      const block = queue.length ? queue.shift() : null;
+      if (block) {
+        const statusEl = block.querySelector('.tool-status');
+        if (msg.is_error) {
+          statusEl.textContent = '失败';
+          statusEl.className = 'tool-status err';
+        } else {
+          statusEl.textContent = `完成 ${msg.elapsed}s`;
+          statusEl.className = 'tool-status ok';
+        }
+        if (queue.length === 0) delete currentTools[msg.name];
+      }
+      break;
+    }
+
+    case 'compaction': {
+      const n = document.createElement('div');
+      n.className = 'compact-notice';
+      n.textContent = `📦 Context 压缩：${msg.before.toLocaleString()} → ${msg.after.toLocaleString()} tokens`;
+      document.getElementById('chat').appendChild(n);
+      break;
+    }
+
+    case 'system': {
+      finishBubble();
+      appendSystemMsg(String(msg.message || ''));
+      setBusy(false);
+      break;
+    }
+
+    case 'done': {
+      if (msg.session_id && String(msg.session_id).trim()) {
+        sessionId = String(msg.session_id).trim();
+        localStorage.setItem('whalefall_session_id', sessionId);
+      }
+      finishBubble();
+      if (msg.aborted) appendSystemMsg('⏹ 已停止');
+      setBusy(false);
+      // 刷新侧边栏（新会话首次发言后出现在列表）
+      loadSessionList();
+      break;
+    }
+
+    case 'error': {
+      finishBubble();
+      appendSystemMsg('⚠ ' + msg.message, true);
+      setBusy(false);
+      break;
+    }
+  }
+}
+
+// ── DOM 工具函数 ──────────────────────────────────────────────────────────
+function startAgentBubble() {
+  const row = document.createElement('div');
+  row.className = 'msg-row agent';
+
+  const av = document.createElement('div');
+  av.className = 'avatar ai';
+  av.textContent = 'AI';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  row.appendChild(av);
+  row.appendChild(bubble);
+  document.getElementById('chat').appendChild(row);
+  scrollBottom();
+  return bubble;
+}
+
+function finishBubble() {
+  if (currentBubble) {
+    const cur = currentBubble.querySelector('.cursor');
+    if (cur) cur.remove();
+    currentBubble = null;
+  }
+  currentTools = {};
+}
+
+function makeToolBlock(name, args) {
+  const block = document.createElement('div');
+  block.className = 'tool-block';
+
+  const header = document.createElement('div');
+  header.className = 'tool-header';
+  header.innerHTML = `
+    <span class="tool-icon">🔧</span>
+    <span class="tool-name">${escHtml(name)}</span>
+    <span class="tool-status running">运行中…</span>
+    <span class="tool-elapsed"></span>
+    <span style="color:var(--muted);font-size:11px">▶</span>
+  `;
+
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  try {
+    body.textContent = JSON.stringify(args, null, 2);
+  } catch {
+    body.textContent = String(args);
+  }
+
+  header.addEventListener('click', () => body.classList.toggle('open'));
+
+  block.appendChild(header);
+  block.appendChild(body);
+  return block;
+}
+
+function appendUserBubble(text) {
+  const row = document.createElement('div');
+  row.className = 'msg-row user';
+
+  const av = document.createElement('div');
+  av.className = 'avatar usr';
+  av.textContent = 'U';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+
+  row.appendChild(av);
+  row.appendChild(bubble);
+  document.getElementById('chat').appendChild(row);
+  scrollBottom();
+}
+
+function appendAgentBubble(text) {
+  const row = document.createElement('div');
+  row.className = 'msg-row agent';
+
+  const av = document.createElement('div');
+  av.className = 'avatar ai';
+  av.textContent = 'AI';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+
+  row.appendChild(av);
+  row.appendChild(bubble);
+  document.getElementById('chat').appendChild(row);
+  scrollBottom();
+}
+
+function appendSystemMsg(text, isError = false) {
+  const el = document.createElement('div');
+  el.className = 'compact-notice';
+  el.style.color = isError ? 'var(--red)' : 'var(--muted)';
+  el.textContent = text;
+  document.getElementById('chat').appendChild(el);
+  scrollBottom();
+}
+
+function scrollBottom() {
+  const c = document.getElementById('chat');
+  c.scrollTop = c.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── 侧边栏：会话列表 ──────────────────────────────────────────────────────
+async function loadSessionList() {
+  try {
+    const resp = await fetch('/api/sessions?limit=40');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderSessionList(data.sessions || []);
+  } catch {
+    // 静默失败（服务器未就绪等情况）
+  }
+}
+
+function renderSessionList(sessions) {
+  const list = document.getElementById('session-list');
+  list.innerHTML = '';
+
+  if (!sessions.length) {
+    const el = document.createElement('div');
+    el.className = 'session-empty';
+    el.textContent = '暂无历史会话';
+    list.appendChild(el);
+    return;
+  }
+
+  for (const s of sessions) {
+    const item = document.createElement('div');
+    item.className = 'session-item' + (s.session_id === sessionId ? ' active' : '');
+    item.dataset.sid = s.session_id;
+
+    const body = document.createElement('div');
+    body.className = 'session-item-body';
+
+    const preview = document.createElement('div');
+    preview.className = 'session-preview';
+    preview.textContent = s.preview || '（空会话）';
+
+    const meta = document.createElement('div');
+    meta.className = 'session-meta';
+    const ts = new Date(s.updated_at * 1000).toLocaleString('zh', {
+      month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit'
+    });
+    meta.textContent = `${s.turns} 轮 · ${ts}`;
+
+    body.appendChild(preview);
+    body.appendChild(meta);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'session-del';
+    delBtn.title = '删除此会话';
+    delBtn.textContent = '🗑';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSession(s.session_id, item);
+    });
+
+    item.appendChild(body);
+    item.appendChild(delBtn);
+    item.addEventListener('click', () => switchSession(s.session_id));
+    list.appendChild(item);
+  }
+}
+
+async function switchSession(sid) {
+  if (sid === sessionId) return;
+
+  sessionId = sid;
+  localStorage.setItem('whalefall_session_id', sessionId);
+
+  // 高亮更新
+  document.querySelectorAll('.session-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.sid === sid);
+  });
+
+  // 清空聊天区，加载历史
+  clearChat();
+  await loadSessionHistory(sid);
+}
+
+async function loadSessionHistory(sid) {
+  try {
+    const resp = await fetch(`/api/sessions/${encodeURIComponent(sid)}/messages`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const msgs = data.messages || [];
+    if (!msgs.length) return;
+
+    const divider = document.createElement('div');
+    divider.className = 'history-divider';
+    divider.textContent = '── 历史记录 ──';
+    document.getElementById('chat').appendChild(divider);
+
+    for (const m of msgs) {
+      if (m.role === 'user') appendUserBubble(m.text);
+      else if (m.role === 'assistant') appendAgentBubble(m.text);
+    }
+  } catch {
+    appendSystemMsg('加载历史记录失败', true);
+  }
+}
+
+function clearChat() {
+  document.getElementById('chat').innerHTML = '';
+  finishBubble();
+  currentTools = {};
+}
+
+// ── 删除单个会话 ──────────────────────────────────────────────────────────
+async function deleteSession(sid, itemEl) {
+  try {
+    const resp = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+    if (!resp.ok) return;
+    // 如果删的是当前会话，新建一个
+    if (sid === sessionId) {
+      sessionId = createSessionId();
+      localStorage.setItem('whalefall_session_id', sessionId);
+      clearChat();
+    }
+    itemEl.remove();
+    // 如果列表空了补提示
+    const list = document.getElementById('session-list');
+    if (!list.querySelector('.session-item')) {
+      const el = document.createElement('div');
+      el.className = 'session-empty';
+      el.textContent = '暂无历史会话';
+      list.appendChild(el);
+    }
+  } catch {
+    appendSystemMsg('删除失败', true);
+  }
+}
+
+// ── 批量清理 ──────────────────────────────────────────────────────────────
+document.querySelectorAll('.clean-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const days = parseInt(btn.dataset.days, 10);
+    if (!confirm(`确定删除 ${days} 天前的所有历史会话？`)) return;
+    try {
+      const resp = await fetch(`/api/sessions/older-than/${days}`, { method: 'DELETE' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      await loadSessionList();
+      // 如果当前会话被删，清空聊天并新建
+      const remaining = document.querySelector(`.session-item[data-sid="${sessionId}"]`);
+      if (!remaining) {
+        sessionId = createSessionId();
+        localStorage.setItem('whalefall_session_id', sessionId);
+        clearChat();
+      }
+      appendSystemMsg(`已清理 ${data.deleted} 个 ${days} 天前的会话`);
+    } catch {
+      appendSystemMsg('清理失败', true);
+    }
+  });
+});
+
+// ── 新建会话 ──────────────────────────────────────────────────────────────
+document.getElementById('new-chat-btn').addEventListener('click', () => {
+  sessionId = createSessionId();
+  localStorage.setItem('whalefall_session_id', sessionId);
+  clearChat();
+  // 取消侧边栏所有高亮
+  document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('input').focus();
+});
+
+// ── 发送 ──────────────────────────────────────────────────────────────────
+function setBusy(b) {
+  busy = b;
+  document.getElementById('send-btn').disabled = b;
+  document.getElementById('input').disabled = b;
+  document.getElementById('stop-btn').classList.toggle('visible', b);
+}
+
+async function abortCurrent() {
+  try {
+    await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, { method: 'POST' });
+  } catch {
+    // 静默失败
+  }
+}
+
+document.getElementById('stop-btn').addEventListener('click', () => {
+  abortCurrent();
+});
+
+function send() {
+  const input = document.getElementById('input');
+  let query = input.value.trim();
+  // 归一化全角斜杠
+  query = query.replace(/／/g, '/').replace(/\u200b|\u200c|\u200d/g, '');
+  query = query.trim();
+  if (!query || busy || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  appendUserBubble(query);
+  input.value = '';
+  autoResize();
+
+  const agentType = document.getElementById('agent-select').value;
+  const model = document.getElementById('model-input').value.trim() || null;
+
+  setBusy(true);
+  currentBubble = null;
+  currentTools = {};
+
+  ws.send(JSON.stringify({ message: query, agent_type: agentType, model, session_id: sessionId }));
+}
+
+// ── 输入框自动高度 ────────────────────────────────────────────────────────
+function autoResize() {
+  const el = document.getElementById('input');
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+}
+
+document.getElementById('input').addEventListener('input', autoResize);
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+document.getElementById('send-btn').addEventListener('click', send);
+
+// 恢复模型输入 + 持久化
+const _mi = document.getElementById('model-input');
+const _sm = localStorage.getItem('whalefall_model');
+if (_mi && _sm) _mi.value = _sm;
+if (_mi) _mi.addEventListener('change', () => {
+  localStorage.setItem('whalefall_model', _mi.value.trim());
+});
+
+// ── 重载 / 重启 ──────────────────────────────────────────────────────────
+async function doReload() {
+  if (!confirm('软重载：重建 LLM / MCP / QueryEngine，重读配置文件（llm_config.ini、mcp/config.yaml）。\n\n' +
+               '进程不会重启，WebSocket 不会断开。\n' +
+               'Python 源代码的修改不会生效（需要用「♻️ 重启进程」）。\n\n继续？')) return;
+  const btn = document.getElementById('reload-btn');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  appendSystemMsg('⏳ 正在软重载（LLM / MCP / QueryEngine）…', false);
+  try {
+    const r = await fetch('/api/reload', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      appendSystemMsg(`✅ 配置已重载 | MCP 工具 ${data.mcp_tool_count} 个 | model=${data.model || '-'}`, false);
+    } else {
+      appendSystemMsg(`❌ 重载失败：${data.error || '未知错误'}`, true);
+    }
+  } catch (e) {
+    appendSystemMsg(`❌ 重载请求失败：${e}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function doRestart() {
+  if (!confirm('硬重启：os.execv 自替换当前进程，所有 Python 代码改动生效。\n\n' +
+               'WebSocket 会断开约 3~5 秒后自动重连。\n' +
+               '正在进行中的对话会被中断。\n\n继续？')) return;
+  const btn = document.getElementById('restart-btn');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  appendSystemMsg('♻️ 正在请求进程重启…', false);
+  try {
+    await fetch('/api/restart', { method: 'POST' });
+  } catch (e) {
+    // execv 可能在响应写回之前就发生，这里忽略即可
+  }
+  if (ws) { try { ws.close(); } catch (_) {} }
+  document.getElementById('status-dot').classList.remove('connected');
+
+  const start = Date.now();
+  let ok = false;
+  while (Date.now() - start < 30000) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const r = await fetch('/health', { cache: 'no-store' });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.ok) {
+          appendSystemMsg(`✅ 进程已重启 | MCP ${d.mcp_tool_count} 个 | model=${d.model || '-'}`, false);
+          ok = true;
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+  if (!ok) {
+    appendSystemMsg('⚠ 30 秒内未恢复，请手动刷新页面或检查终端日志', true);
+  }
+  btn.disabled = false;
+  btn.textContent = old;
+}
+
+document.getElementById('reload-btn').addEventListener('click', doReload);
+document.getElementById('restart-btn').addEventListener('click', doRestart);
+
+// ── 启动 ─────────────────────────────────────────────────────────────────
+connect();
+
+// 加载侧边栏 + 恢复当前会话历史
+loadSessionList().then(() => loadSessionHistory(sessionId));
+</script>
+</body>
+</html>

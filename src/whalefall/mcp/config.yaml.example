@@ -1,0 +1,31 @@
+# MCP server 配置模板。
+#
+# 使用方法：
+#   1. 复制为 config.yaml（同目录）
+#   2. 把 <PROJECT_ROOT> 换成 whalefall 仓库在本机的绝对路径（包含 src/ 的上一级）
+#   3. 启动服务后会自动拉起下面列出的 servers 作为子进程
+#
+# type: stdio — 本地子进程，通过 stdin/stdout 通信（MCP 协议官方推荐）
+# type: sse   — 远程 SSE（Server-Sent Events）HTTP 服务
+# type: http  — 远程 Streamable HTTP（MCP 新标准）
+
+servers:
+  demo:
+    type: stdio
+    command: python
+    args: ["-m", "whalefall.mcp.server"]
+    env:
+      PYTHONPATH: <PROJECT_ROOT>/src
+    description: 内置演示 MCP server（echo / add / time_now）
+
+  # ── 示例：SSE 远程服务 ──────────────────────────────────────────────────
+  # remote_sse:
+  #   type: sse
+  #   url: http://localhost:8800/sse
+  #   description: 远程 MCP 服务（SSE）
+
+  # ── 示例：Streamable HTTP 远程服务 ───────────────────────────────────────
+  # remote_http:
+  #   type: http
+  #   url: http://localhost:8800/mcp
+  #   description: 远程 MCP 服务（HTTP）
